@@ -147,10 +147,19 @@ async def agent_call(request: Request):
                 return HTMLResponse(content=str(twiml), media_type="application/xml")
         
         # Generate TwiML
-        host = request.url.hostname
-        # Use WSS for production, WS for localhost
-        protocol = "wss" if "localhost" not in host and "127.0.0.1" not in host else "ws"
-        stream_url = f"{protocol}://{host}/media-stream/{call_sid}"
+        # Use AI_CALLING_SERVICE_URL for production (Railway proxy issue)
+        # Fallback to request hostname for local development
+        if AI_CALLING_SERVICE_URL:
+            raw_domain = AI_CALLING_SERVICE_URL
+            domain = re.sub(r'(^\w+:|^)\/\/|\/+$', '', raw_domain)
+            # Use WSS for production URLs, WS for localhost
+            protocol = "wss" if "localhost" not in domain and "127.0.0.1" not in domain else "ws"
+            stream_url = f"{protocol}://{domain}/media-stream/{call_sid}"
+        else:
+            # Fallback for local development
+            host = request.url.hostname
+            protocol = "wss" if "localhost" not in host and "127.0.0.1" not in host else "ws"
+            stream_url = f"{protocol}://{host}/media-stream/{call_sid}"
         
         print(f"📞 Setting up Media Stream for agent: stream_url={stream_url}")
         
