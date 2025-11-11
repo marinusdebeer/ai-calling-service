@@ -91,7 +91,6 @@ async def update_call_status(
                     
                     # If it's an INBOUND call and doesn't have routedToAI set, update metadata
                     if direction == "INBOUND" and not metadata.get("routedToAI"):
-                        print(f"📝 Incoming call detected - updating metadata to mark as AI-routed")
                         await update_call_metadata(call_id, {"routedToAI": True, "aiMode": True})
             
             # If ending the call, calculate duration
@@ -195,8 +194,6 @@ async def update_call_metadata(call_id: str, metadata: dict):
             )
             if response.status_code != 200:
                 print(f"⚠️ Failed to update call metadata: {response.status_code} - {response.text}")
-            else:
-                print(f"✅ Updated call metadata for callId={call_id}: {metadata}")
     except Exception as e:
         print(f"❌ Error updating call metadata: {e}")
         import traceback

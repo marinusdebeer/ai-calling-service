@@ -48,7 +48,6 @@ async def initialize_session(openai_ws, initial_prompts=None):
     
     await openai_ws.send(json.dumps(payload))
     # Don't trigger response here - we'll do it after sending the initial greeting
-    print(f"✅ OpenAI session initialized with input transcription enabled")
 
 
 async def connect_to_openai_realtime(initial_prompts=None):
@@ -65,8 +64,6 @@ async def connect_to_openai_realtime(initial_prompts=None):
                 "OpenAI-Beta": "realtime=v1",
             },
         )
-        
-        print(f"✅ Connected to OpenAI Realtime API WebSocket")
         
         # Initialize the session with proper configuration and initial prompts
         await initialize_session(openai_ws, initial_prompts=initial_prompts)
@@ -107,7 +104,6 @@ async def send_initial_greeting(openai_ws, initial_prompts=None):
             await openai_ws.send(json.dumps(greeting_message))
             # Trigger the AI to respond (this will make it speak first)
             await openai_ws.send(json.dumps({"type": "response.create"}))
-            print(f"✅ Initial greeting sent with objectives: {combined_instruction}")
     else:
         # No initial prompts - send a generic greeting to make AI speak first
         greeting_message = {
@@ -125,5 +121,4 @@ async def send_initial_greeting(openai_ws, initial_prompts=None):
         }
         await openai_ws.send(json.dumps(greeting_message))
         await openai_ws.send(json.dumps({"type": "response.create"}))
-        print(f"✅ Initial greeting sent (no specific objectives)")
 

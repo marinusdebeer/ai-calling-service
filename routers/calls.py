@@ -51,12 +51,6 @@ async def incoming_call(request: Request):
         
         # Try to find callId from Next.js API using callSid
         call_id = await fetch_call_id(call_sid)
-        if call_id:
-            print(f"   Found callId={call_id} for callSid={call_sid}")
-        
-        print(f"📞 Routing call to Twilio AI Agent (callId={call_id})")
-        if call_id:
-            print(f"   Recording callback: {APP_URL}/api/calls/recording-webhook?callId={call_id}")
         
         # Store mapping for agent-call to look up later
         if call_id:
@@ -65,7 +59,6 @@ async def incoming_call(request: Request):
                 "from": caller,
                 "timestamp": time.time()
             }
-            print(f"   Stored mapping: originalCallSid={call_sid} → callId={call_id}")
         
         twiml = VoiceResponse()
         
@@ -97,15 +90,11 @@ async def agent_call(request: Request):
     Sets up Media Stream to bridge to OpenAI Realtime API
     """
     try:
-        print(f"🔔 Agent-call endpoint called: method={request.method}, url={request.url}")
-        
         # Parse form data (POST) or query params (GET)
         if request.method == "POST":
             data = await request.form()
-            print(f"📥 POST form data received: {dict(data)}")
         else:
             data = request.query_params
-            print(f"📥 GET query params received: {dict(data)}")
         
         call_sid = data.get("CallSid")  # This is the agent's callSid (different from original)
         if not call_sid:
@@ -113,7 +102,6 @@ async def agent_call(request: Request):
             return HTMLResponse("Error: CallSid missing", media_type="text/plain", status_code=400)
         
         from_number = data.get("From", "")
-        print(f"📞 Agent call details: CallSid={call_sid}, From={from_number}")
         
         original_call_sid = None
         call_id = None
@@ -135,18 +123,15 @@ async def agent_call(request: Request):
             # Store mapping for Media Stream handler
             agent_call_mapping[call_sid] = original_call_sid
             
-            print(f"🤖 Agent call received (incoming): agentCallSid={call_sid}, originalCallSid={original_call_sid}, callId={call_id}")
+            print(f"🤖 Agent call received: agentCallSid={call_sid}, callId={call_id}")
         else:
-            print(f"🤖 Agent call received: callSid={call_sid}, from={from_number} (no matching call found)")
             # Fallback: try to look up by callSid in Next.js API
             call_id = await fetch_call_id(call_sid)
-            if call_id:
-                print(f"   Found callId={call_id} via Next.js API lookup")
             
             # If we still don't have a callId, this is likely a duplicate or orphaned agent call
             # Reject it to prevent it from showing up in the browser
             if not call_id:
-                print(f"⚠️ Rejecting agent call without callId: callSid={call_sid}, from={from_number}")
+                print(f"⚠️ Rejecting agent call without callId: callSid={call_sid}")
                 twiml = VoiceResponse()
                 twiml.hangup()
                 return HTMLResponse(content=str(twiml), media_type="application/xml")
@@ -172,10 +157,6 @@ async def agent_call(request: Request):
             protocol = "wss" if "localhost" not in host and "127.0.0.1" not in host else "ws"
             stream_url = f"{protocol}://{host}/media-stream/{call_id}".strip().replace('\n', '').replace('\r', '')
         
-        print(f"📞 Setting up Media Stream for agent: stream_url={stream_url}")
-        print(f"   Using AI_CALLING_SERVICE_URL: {AI_CALLING_SERVICE_URL}")
-        print(f"   Domain extracted: {domain if AI_CALLING_SERVICE_URL else 'N/A (using request hostname)'}")
-        
         # Incoming call: Set up Media Stream (this bridges to OpenAI Realtime API)
         twiml = VoiceResponse()
         connect = Connect()
@@ -186,8 +167,6 @@ async def agent_call(request: Request):
         twiml.pause(length=3600)  # Pause for 1 hour (max call duration)
         
         twiml_xml = str(twiml)
-        print(f"📋 Generated TwiML for agent-call:")
-        print(f"   {twiml_xml}")
         
         return HTMLResponse(content=twiml_xml, media_type="application/xml")
     
@@ -279,11 +258,6 @@ async def initiate_ai_call(request: Request):
         twiml_response.pause(length=3600)  # Pause for 1 hour (max call duration)
         outbound_twiml = str(twiml_response)
         
-        print(f"📋 Generated TwiML for outgoing call:")
-        print(f"   {outbound_twiml}")
-        print(f"   WebSocket URL: {stream_url}")
-        print(f"   Note: Twilio will send actual callSid in WebSocket connection data")
-        
         # Enable recording for outgoing AI calls
         recording_callback = None
         if call_id:
@@ -299,8 +273,7 @@ async def initiate_ai_call(request: Request):
         )
         
         call_sid = call.sid
-        print(f"✅ Call started with SID: {call_sid}")
-        print(f"   Mapping: callSid={call_sid} → callId={call_id}")
+        print(f"✅ Call started: callSid={call_sid}, callId={call_id}")
         
         # Store mapping for Media Stream handler
         # The handler receives call_id in URL path, but needs to map to callSid
@@ -323,7 +296,6 @@ async def initiate_ai_call(request: Request):
                 "is_outgoing": True,
                 "initial_prompts": initial_prompts,
             }
-            print(f"📝 Stored mappings: callId={call_id} and callSid={call_sid}")
         
         # Update call record in Next.js database
         await update_call_record(call_id, call.sid, "RINGING")
