@@ -80,6 +80,20 @@ async def update_call_status(
             if ended_at:
                 payload["endedAt"] = ended_at
             
+            # If setting status to IN_PROGRESS, check if this is an incoming call
+            # that needs metadata updated (for active AI calls list)
+            if status == "IN_PROGRESS":
+                call_details = await fetch_call_details(call_id)
+                if call_details:
+                    call_data = call_details.get("call", {})
+                    direction = call_data.get("direction")
+                    metadata = call_data.get("metadata", {}) or {}
+                    
+                    # If it's an INBOUND call and doesn't have routedToAI set, update metadata
+                    if direction == "INBOUND" and not metadata.get("routedToAI"):
+                        print(f"📝 Incoming call detected - updating metadata to mark as AI-routed")
+                        await update_call_metadata(call_id, {"routedToAI": True, "aiMode": True})
+            
             # If ending the call, calculate duration
             if status == "COMPLETED" and ended_at:
                 call_details = await fetch_call_details(call_id)
@@ -165,6 +179,28 @@ async def update_call_record(call_id: str, twilio_call_sid: str, status: str = "
             )
     except Exception as e:
         print(f"⚠️ Error updating call record in Next.js: {e}")
+
+
+async def update_call_metadata(call_id: str, metadata: dict):
+    """Update call metadata in Next.js database"""
+    if not call_id:
+        return
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{APP_URL}/api/calls/{call_id}/metadata",
+                json={"metadata": metadata},
+                timeout=5.0
+            )
+            if response.status_code != 200:
+                print(f"⚠️ Failed to update call metadata: {response.status_code} - {response.text}")
+            else:
+                print(f"✅ Updated call metadata for callId={call_id}: {metadata}")
+    except Exception as e:
+        print(f"❌ Error updating call metadata: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 async def forward_webhook(call_id: str | None, form_data: dict):

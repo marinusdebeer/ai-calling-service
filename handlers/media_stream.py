@@ -11,6 +11,7 @@ from services.nextjs_client import (
     fetch_call_id,
     update_call_status,
     send_transcript,
+    update_call_metadata,
 )
 from state import (
     active_connections,
