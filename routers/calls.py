@@ -3,7 +3,6 @@ Call-related endpoints
 """
 import re
 import time
-from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from twilio.twiml.voice_response import VoiceResponse, Connect
@@ -156,52 +155,20 @@ async def agent_call(request: Request):
         # Use AI_CALLING_SERVICE_URL for production (Railway proxy issue)
         # Fallback to request hostname for local development
         if AI_CALLING_SERVICE_URL:
-            # Remove protocol (http:// or https://) and trailing slashes
-            domain = re.sub(r'^https?://', '', AI_CALLING_SERVICE_URL).rstrip('/')
-            
-            # Validate domain format
-            if not domain or '/' in domain.split('.')[0] or not domain.count('.') >= 1:
-                print(f"❌ Invalid domain extracted: '{domain}' from '{AI_CALLING_SERVICE_URL}'")
-                response = VoiceResponse()
-                response.say("Sorry, service configuration error.", voice="alice")
-                return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
-            
+            raw_domain = AI_CALLING_SERVICE_URL
+            domain = re.sub(r'(^\w+:|^)\/\/|\/+$', '', raw_domain)
             # Use WSS for production URLs, WS for localhost
             protocol = "wss" if "localhost" not in domain and "127.0.0.1" not in domain else "ws"
-            
-            # Validate call_sid is URL-safe
-            path_segment = str(call_sid).strip()
-            if not path_segment or '/' in path_segment or '?' in path_segment or '#' in path_segment:
-                print(f"❌ Invalid call_sid for URL: '{call_sid}'")
-                response = VoiceResponse()
-                response.say("Sorry, call configuration error.", voice="alice")
-                return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
-            
-            stream_url = f"{protocol}://{domain}/media-stream/{path_segment}"
-            
-            # Validate the complete URL format
-            try:
-                parsed = urlparse(stream_url)
-                if not parsed.scheme or not parsed.netloc or not parsed.path:
-                    raise ValueError("Invalid URL components")
-                # Reconstruct to ensure proper formatting
-                stream_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
-            except Exception as e:
-                print(f"❌ Failed to validate Stream URL: {stream_url}, error: {e}")
-                response = VoiceResponse()
-                response.say("Sorry, service configuration error.", voice="alice")
-                return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
+            stream_url = f"{protocol}://{domain}/media-stream/{call_sid}"
         else:
             # Fallback for local development
             host = request.url.hostname
             protocol = "wss" if "localhost" not in host and "127.0.0.1" not in host else "ws"
             stream_url = f"{protocol}://{host}/media-stream/{call_sid}"
         
-        print(f"📞 Setting up Media Stream for agent:")
-        print(f"   AI_CALLING_SERVICE_URL: {AI_CALLING_SERVICE_URL}")
-        print(f"   Extracted domain: {domain if AI_CALLING_SERVICE_URL else host}")
-        print(f"   Protocol: {protocol}")
-        print(f"   Stream URL: {stream_url}")
+        print(f"📞 Setting up Media Stream for agent: stream_url={stream_url}")
+        print(f"   Using AI_CALLING_SERVICE_URL: {AI_CALLING_SERVICE_URL}")
+        print(f"   Domain extracted: {domain if AI_CALLING_SERVICE_URL else 'N/A (using request hostname)'}")
         
         # Incoming call: Set up Media Stream (this bridges to OpenAI Realtime API)
         twiml = VoiceResponse()
@@ -224,106 +191,6 @@ async def agent_call(request: Request):
         traceback.print_exc()
         response = VoiceResponse()
         response.say("Sorry, we encountered an error. Please try again later.", voice="alice")
-        return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
-
-
-@router.api_route("/outbound-twiml", methods=["GET", "POST"])
-async def outbound_twiml(request: Request):
-    """
-    Generate TwiML for outbound AI calls
-    Called by Twilio when an outbound call is answered
-    Uses the actual callSid from Twilio's request to construct the WebSocket URL
-    """
-    try:
-        # Parse form data (POST) or query params (GET)
-        if request.method == "POST":
-            data = await request.form()
-        else:
-            data = request.query_params
-        
-        # Get callSid from Twilio (this is the actual Twilio Call SID)
-        call_sid = data.get("CallSid") or data.get("callSid")
-        call_id = data.get("callId") or data.get("CallId")
-        
-        if not call_sid:
-            print("❌ CallSid missing in outbound TwiML request")
-            response = VoiceResponse()
-            response.say("Sorry, call configuration error.", voice="alice")
-            return HTMLResponse(content=str(response), media_type="application/xml", status_code=400)
-        
-        print(f"📋 Generating TwiML for outbound call:")
-        print(f"   CallSid from Twilio: {call_sid}")
-        print(f"   CallId from query: {call_id}")
-        
-        # Try to get callId from mapping if not provided
-        if not call_id and call_sid in incoming_call_mapping:
-            call_id = incoming_call_mapping[call_sid].get("call_id")
-            print(f"   Found callId from mapping: {call_id}")
-        
-        # Extract domain from AI_CALLING_SERVICE_URL
-        if not AI_CALLING_SERVICE_URL:
-            print("❌ AI_CALLING_SERVICE_URL not configured")
-            response = VoiceResponse()
-            response.say("Sorry, service configuration error.", voice="alice")
-            return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
-        
-        # Remove protocol (http:// or https://) and trailing slashes
-        domain = re.sub(r'^https?://', '', AI_CALLING_SERVICE_URL).rstrip('/')
-        
-        # Validate domain format
-        if not domain or '/' in domain.split('.')[0] or not domain.count('.') >= 1:
-            print(f"❌ Invalid domain extracted: '{domain}' from '{AI_CALLING_SERVICE_URL}'")
-            response = VoiceResponse()
-            response.say("Sorry, service configuration error.", voice="alice")
-            return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
-        
-        # Validate call_sid is URL-safe
-        path_segment = str(call_sid).strip()
-        if not path_segment or '/' in path_segment or '?' in path_segment or '#' in path_segment:
-            print(f"❌ Invalid call_sid for URL: '{call_sid}'")
-            response = VoiceResponse()
-            response.say("Sorry, call configuration error.", voice="alice")
-            return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
-        
-        # Construct WebSocket URL using the actual callSid from Twilio
-        websocket_url = f"wss://{domain}/media-stream/{path_segment}"
-        
-        # Validate the complete URL format
-        try:
-            parsed = urlparse(websocket_url)
-            if not parsed.scheme or not parsed.netloc or not parsed.path:
-                raise ValueError("Invalid URL components")
-            # Reconstruct to ensure proper formatting
-            websocket_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
-        except Exception as e:
-            print(f"❌ Failed to validate WebSocket URL: {websocket_url}, error: {e}")
-            response = VoiceResponse()
-            response.say("Sorry, service configuration error.", voice="alice")
-            return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
-        
-        print(f"   WebSocket URL: {websocket_url}")
-        
-        # Generate TwiML with Connect/Stream
-        twiml = VoiceResponse()
-        connect = Connect()
-        connect.stream(url=websocket_url)
-        twiml.append(connect)
-        
-        # Keep call active
-        twiml.pause(length=3600)  # Pause for 1 hour (max call duration)
-        
-        twiml_xml = str(twiml)
-        print(f"✅ Generated TwiML for outbound call:")
-        print(f"   {twiml_xml}")
-        
-        return HTMLResponse(content=twiml_xml, media_type="application/xml")
-        
-    except Exception as e:
-        print(f"❌ Error generating outbound TwiML: {e}")
-        import traceback
-        traceback.print_exc()
-        response = VoiceResponse()
-        response.say("Sorry, an error occurred.", voice="alice")
         return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
 
 
@@ -375,72 +242,19 @@ async def initiate_ai_call(request: Request):
         # Note: We use call_id in the URL path, but Twilio will send the actual callSid
         # in the WebSocket connection data. The handler will extract callSid from the
         # WebSocket "connected" event and use that to look up the mapping.
+        raw_domain = AI_CALLING_SERVICE_URL or ""
+        domain = re.sub(r'(^\w+:|^)\/\/|\/+$', '', raw_domain)
         
-        # Extract domain from AI_CALLING_SERVICE_URL (remove protocol and trailing slashes)
-        if not AI_CALLING_SERVICE_URL:
-            return JSONResponse(
-                {"error": "AI_CALLING_SERVICE_URL not configured"},
-                status_code=500
-            )
+        # Use call_id in URL - handler will get actual callSid from WebSocket connection
+        outbound_twiml = (
+            f'<?xml version="1.0" encoding="UTF-8"?>'
+            f'<Response><Connect><Stream url="wss://{domain}/media-stream/{call_id}" /></Connect></Response>'
+        )
         
-        # Remove protocol (http:// or https://) and trailing slashes
-        domain = re.sub(r'^https?://', '', AI_CALLING_SERVICE_URL).rstrip('/')
-        
-        # Validate domain format
-        if not domain or '/' in domain.split('.')[0] or not domain.count('.') >= 1:
-            print(f"❌ Invalid domain extracted: '{domain}' from '{AI_CALLING_SERVICE_URL}'")
-            return JSONResponse(
-                {"error": f"Invalid AI_CALLING_SERVICE_URL format: {AI_CALLING_SERVICE_URL}"},
-                status_code=500
-            )
-        
-        # Construct WebSocket URL - must be wss:// for production
-        # Ensure call_id is URL-safe (it should be, but validate)
-        path_segment = str(call_id).strip()
-        if not path_segment or '/' in path_segment or '?' in path_segment or '#' in path_segment:
-            print(f"❌ Invalid call_id for URL: '{call_id}'")
-            return JSONResponse(
-                {"error": f"Invalid call_id format: {call_id}"},
-                status_code=400
-            )
-        
-        websocket_url = f"wss://{domain}/media-stream/{path_segment}"
-        
-        # Validate the complete URL format using urlparse
-        try:
-            parsed = urlparse(websocket_url)
-            if not parsed.scheme or not parsed.netloc or not parsed.path:
-                raise ValueError("Invalid URL components")
-            # Reconstruct to ensure proper formatting
-            websocket_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
-        except Exception as e:
-            print(f"❌ Failed to validate WebSocket URL: {websocket_url}, error: {e}")
-            return JSONResponse(
-                {"error": f"Invalid WebSocket URL format: {websocket_url}"},
-                status_code=500
-            )
-        
-        # Store mapping BEFORE creating call so TwiML endpoint can look it up
-        if call_id:
-            incoming_call_mapping[call_id] = {
-                "call_id": call_id,
-                "from": from_phone,
-                "to": to_phone,
-                "timestamp": time.time(),
-                "is_outgoing": True,
-                "initial_prompts": initial_prompts,
-            }
-            print(f"📝 Stored mapping for callId={call_id} (will be updated with callSid after call creation)")
-        
-        # Use TwiML URL instead of inline TwiML
-        # This allows us to use the actual callSid when Twilio requests the TwiML
-        twiml_url = f"{AI_CALLING_SERVICE_URL}/outbound-twiml?callId={call_id}"
-        
-        print(f"📋 Creating call with TwiML URL:")
-        print(f"   TwiML URL: {twiml_url}")
-        print(f"   From: {from_phone}")
-        print(f"   To: {to_phone}")
-        print(f"   CallId: {call_id}")
+        print(f"📋 Generated TwiML for outgoing call:")
+        print(f"   {outbound_twiml}")
+        print(f"   WebSocket URL: wss://{domain}/media-stream/{call_id}")
+        print(f"   Note: Twilio will send actual callSid in WebSocket connection data")
         
         # Enable recording for outgoing AI calls
         recording_callback = None
@@ -450,8 +264,7 @@ async def initiate_ai_call(request: Request):
         call = twilio_client.calls.create(
             from_=from_phone,
             to=to_phone,
-            url=twiml_url,  # Use URL instead of inline TwiML
-            method="POST",  # Twilio will POST to this URL
+            twiml=outbound_twiml,
             record=True,  # Enable recording
             recording_status_callback=recording_callback,
             recording_status_callback_method="POST",
@@ -461,12 +274,28 @@ async def initiate_ai_call(request: Request):
         print(f"✅ Call started with SID: {call_sid}")
         print(f"   Mapping: callSid={call_sid} → callId={call_id}")
         
-        # Update mapping with callSid (already stored by callId above)
-        if call_id and call_id in incoming_call_mapping:
-            incoming_call_mapping[call_id]["twilio_call_sid"] = call_sid
-            # Also store by callSid for reverse lookup
-            incoming_call_mapping[call_sid] = incoming_call_mapping[call_id].copy()
-            print(f"📝 Updated mappings: callId={call_id} ↔ callSid={call_sid}")
+        # Store mapping for Media Stream handler
+        # The handler receives call_id in URL path, but needs to map to callSid
+        # Store by both call_id (for URL lookup) and callSid (for WebSocket data lookup)
+        if call_id:
+            incoming_call_mapping[call_id] = {
+                "call_id": call_id,
+                "twilio_call_sid": call_sid,
+                "from": TWILIO_PHONE_NUMBER,
+                "to": to_phone,
+                "timestamp": time.time(),
+                "is_outgoing": True,
+                "initial_prompts": initial_prompts,
+            }
+            incoming_call_mapping[call_sid] = {
+                "call_id": call_id,
+                "from": TWILIO_PHONE_NUMBER,
+                "to": to_phone,
+                "timestamp": time.time(),
+                "is_outgoing": True,
+                "initial_prompts": initial_prompts,
+            }
+            print(f"📝 Stored mappings: callId={call_id} and callSid={call_sid}")
         
         # Update call record in Next.js database
         await update_call_record(call_id, call.sid, "RINGING")
