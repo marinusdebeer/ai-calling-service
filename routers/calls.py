@@ -97,11 +97,15 @@ async def agent_call(request: Request):
     Sets up Media Stream to bridge to OpenAI Realtime API
     """
     try:
+        print(f"🔔 Agent-call endpoint called: method={request.method}, url={request.url}")
+        
         # Parse form data (POST) or query params (GET)
         if request.method == "POST":
             data = await request.form()
+            print(f"📥 POST form data received: {dict(data)}")
         else:
             data = request.query_params
+            print(f"📥 GET query params received: {dict(data)}")
         
         call_sid = data.get("CallSid")  # This is the agent's callSid (different from original)
         if not call_sid:
@@ -109,6 +113,7 @@ async def agent_call(request: Request):
             return HTMLResponse("Error: CallSid missing", media_type="text/plain", status_code=400)
         
         from_number = data.get("From", "")
+        print(f"📞 Agent call details: CallSid={call_sid}, From={from_number}")
         
         original_call_sid = None
         call_id = None
@@ -162,6 +167,8 @@ async def agent_call(request: Request):
             stream_url = f"{protocol}://{host}/media-stream/{call_sid}"
         
         print(f"📞 Setting up Media Stream for agent: stream_url={stream_url}")
+        print(f"   Using AI_CALLING_SERVICE_URL: {AI_CALLING_SERVICE_URL}")
+        print(f"   Domain extracted: {domain if AI_CALLING_SERVICE_URL else 'N/A (using request hostname)'}")
         
         # Incoming call: Set up Media Stream (this bridges to OpenAI Realtime API)
         twiml = VoiceResponse()
@@ -172,7 +179,11 @@ async def agent_call(request: Request):
         # Keep call active
         twiml.pause(length=3600)  # Pause for 1 hour (max call duration)
         
-        return HTMLResponse(content=str(twiml), media_type="application/xml")
+        twiml_xml = str(twiml)
+        print(f"📋 Generated TwiML for agent-call:")
+        print(f"   {twiml_xml}")
+        
+        return HTMLResponse(content=twiml_xml, media_type="application/xml")
     
     except Exception as e:
         print(f"❌ Error handling agent call: {e}")

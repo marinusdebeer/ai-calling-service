@@ -28,7 +28,17 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     For outgoing calls, call_sid might be callId (from inline TwiML) or actual callSid
     """
     print(f"📡 WebSocket connection attempt: callSid={call_sid}")
-    await websocket.accept()
+    print(f"   WebSocket client: {websocket.client if hasattr(websocket, 'client') else 'N/A'}")
+    print(f"   WebSocket URL: {websocket.url if hasattr(websocket, 'url') else 'N/A'}")
+    
+    try:
+        await websocket.accept()
+        print(f"✅ WebSocket accepted: callSid={call_sid}")
+    except Exception as e:
+        print(f"❌ Failed to accept WebSocket: {e}")
+        import traceback
+        traceback.print_exc()
+        return
     
     print(f"🔌 Twilio Media Stream connected: callSid={call_sid}")
     
@@ -57,8 +67,17 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
         await send_initial_greeting(openai_ws, initial_prompts)
     except Exception as e:
         print(f"❌ Failed to connect to OpenAI: {e}")
+        print(f"   CallSid: {call_sid}")
         import traceback
         traceback.print_exc()
+        # Try to update call status to failed
+        try:
+            call_id = await fetch_call_id(call_sid)
+            if call_id:
+                await update_call_status(call_id, "FAILED")
+                print(f"   ✅ Updated call status to FAILED for callId={call_id}")
+        except Exception as e:
+            print(f"   ⚠️ Failed to update call status: {e}")
         return
     
     stream_sid = None
@@ -125,20 +144,23 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                     print(f"📞 Media Stream started: streamSid={stream_sid}")
                 
                 elif evt == "stop":
-                    print(f"📞 Media Stream stopped - call ending")
+                    print(f"🛑 Media Stream stopped - call ending")
+                    print(f"   CallSid: {call_sid}, StreamSid: {stream_sid}")
                     # Close OpenAI WebSocket to signal send_twilio to exit
                     if openai_ws and openai_ws.open:
                         try:
                             await openai_ws.close()
+                            print(f"   ✅ OpenAI WebSocket closed")
                         except Exception as e:
-                            print(f"Error closing OpenAI socket on stop: {e}")
+                            print(f"   ❌ Error closing OpenAI socket on stop: {e}")
                     # Break the loop to allow finally block to execute
                     break
                 else:
                     if evt not in ["connected", "media", "start", "stop"]:
-                        print(f"📨 Unknown Twilio event: {evt}")
-        except WebSocketDisconnect:
-            print("Twilio WebSocket disconnected in recv_twilio - call ending")
+                        print(f"📨 Unknown Twilio event: {evt}, data: {data}")
+        except WebSocketDisconnect as e:
+            print(f"🔌 Twilio WebSocket disconnected in recv_twilio - call ending")
+            print(f"   CallSid: {call_sid}, Error: {e}")
             # Close OpenAI WebSocket to signal send_twilio to exit
             if openai_ws and openai_ws.open:
                 try:
@@ -216,14 +238,16 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                         print(f"📝 AI text response (callSid={call_sid}): {text}")
                         # Send to Next.js for real-time display
                         await send_transcript(call_id, text, "ai")
-        except WebSocketDisconnect:
-            print("OpenAI WebSocket disconnected during send_twilio - call ending")
+        except WebSocketDisconnect as e:
+            print(f"🔌 OpenAI WebSocket disconnected during send_twilio - call ending")
+            print(f"   CallSid: {call_sid}, Error: {e}")
         except Exception as e:
             print(f"❌ Error in send_twilio: {e}")
+            print(f"   CallSid: {call_sid}")
             import traceback
             traceback.print_exc()
         finally:
-            print("📞 send_twilio() completed")
+            print(f"📞 send_twilio() completed for callSid={call_sid}")
     
     try:
         # Run both directions concurrently
