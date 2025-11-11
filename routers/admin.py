@@ -33,20 +33,35 @@ async def admin_prompt(request: Request):
         if call_sid in active_connections:
             connection_key = call_sid
         else:
-            # For incoming calls: look up agent callSid from original callSid
-            for agent_sid, original_sid in agent_call_mapping.items():
-                if original_sid == call_sid:
-                    connection_key = agent_sid
-                    break
-            
-            # For outgoing calls: look up callId from Twilio callSid
-            if not connection_key and call_sid in incoming_call_mapping:
+            # For incoming calls: look up callId from original callSid
+            # The incoming_call_mapping stores: original_callSid -> {call_id: ...}
+            if call_sid in incoming_call_mapping:
                 call_id = incoming_call_mapping[call_sid].get("call_id")
                 if call_id and call_id in active_connections:
                     connection_key = call_id
+                    print(f"✅ Found connection via incoming_call_mapping: callSid={call_sid} -> callId={call_id}")
+            
+            # Also try looking up agent callSid from original callSid
+            if not connection_key:
+                for agent_sid, original_sid in agent_call_mapping.items():
+                    if original_sid == call_sid:
+                        if agent_sid in active_connections:
+                            connection_key = agent_sid
+                            print(f"✅ Found connection via agent_call_mapping: callSid={call_sid} -> agentSid={agent_sid}")
+                            break
+                        # Also try to get callId from the agent callSid
+                        if agent_sid in incoming_call_mapping:
+                            call_id = incoming_call_mapping[agent_sid].get("call_id")
+                            if call_id and call_id in active_connections:
+                                connection_key = call_id
+                                print(f"✅ Found connection via agent callId: callSid={call_sid} -> callId={call_id}")
+                                break
         
         if not connection_key:
             print(f"⚠️ No connection found for callSid={call_sid}")
+            print(f"   Available active_connections keys: {list(active_connections.keys())[:10]}")
+            print(f"   Available incoming_call_mapping keys: {list(incoming_call_mapping.keys())[:10]}")
+            print(f"   Available agent_call_mapping keys: {list(agent_call_mapping.keys())[:10]}")
             return JSONResponse(
                 {"error": "No active connection found for this call"},
                 status_code=404
