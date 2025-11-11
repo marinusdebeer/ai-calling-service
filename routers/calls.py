@@ -1,0 +1,283 @@
+"""
+Call-related endpoints
+"""
+import re
+import time
+from fastapi import APIRouter, Request, WebSocket
+from fastapi.responses import HTMLResponse, JSONResponse
+from twilio.twiml.voice_response import VoiceResponse, Connect
+
+from config import (
+    APP_URL,
+    TWILIO_PHONE_NUMBER,
+    TWILIO_ZEN_ZONE_AGENT_SID,
+    AI_CALLING_SERVICE_URL,
+)
+from services.twilio_service import get_twilio_client, is_twilio_configured
+from services.nextjs_client import fetch_call_id, update_call_record
+from state import incoming_call_mapping, agent_call_mapping
+from handlers.media_stream import handle_media_stream
+
+router = APIRouter()
+
+
+@router.websocket("/media-stream/{call_sid}")
+async def media_stream_websocket(websocket: WebSocket, call_sid: str):
+    """Media Stream WebSocket endpoint"""
+    await handle_media_stream(websocket, call_sid)
+
+
+@router.api_route("/incoming-call", methods=["GET", "POST"])
+async def incoming_call(request: Request):
+    """
+    Handle incoming calls and route to Twilio AI Agent
+    Called by Twilio when someone calls your Twilio number
+    Uses Dial with agent application to create 2 participants (enables recording)
+    """
+    try:
+        # Parse form data (POST) or query params (GET)
+        if request.method == "POST":
+            data = await request.form()
+        else:
+            data = request.query_params
+        
+        call_sid = data.get("CallSid")
+        if not call_sid:
+            print("❌ CallSid missing in incoming call")
+            return HTMLResponse("Error: CallSid missing", media_type="text/plain", status_code=400)
+        
+        caller = data.get("From", "")
+        print(f"📞 Incoming call from: {caller}, callSid={call_sid}")
+        
+        # Try to find callId from Next.js API using callSid
+        call_id = await fetch_call_id(call_sid)
+        if call_id:
+            print(f"   Found callId={call_id} for callSid={call_sid}")
+        
+        print(f"📞 Routing call to Twilio AI Agent (callId={call_id})")
+        if call_id:
+            print(f"   Recording callback: {APP_URL}/api/calls/recording-webhook?callId={call_id}")
+        
+        # Store mapping for agent-call to look up later
+        if call_id:
+            incoming_call_mapping[call_sid] = {
+                "call_id": call_id,
+                "from": caller,
+                "timestamp": time.time()
+            }
+            print(f"   Stored mapping: originalCallSid={call_sid} → callId={call_id}")
+        
+        twiml = VoiceResponse()
+        
+        # Dial the Twilio AI Agent application
+        # This creates 2 participants (caller + agent) which enables recording
+        dial = twiml.dial(
+            record="record-from-answer-dual",
+            recording_status_callback=f"{APP_URL}/api/calls/recording-webhook?callId={call_id}" if call_id else None,
+            recording_status_callback_method="POST",
+        )
+        dial.application(TWILIO_ZEN_ZONE_AGENT_SID)
+        
+        return HTMLResponse(content=str(twiml), media_type="application/xml")
+    
+    except Exception as e:
+        print(f"❌ Error handling incoming call: {e}")
+        import traceback
+        traceback.print_exc()
+        response = VoiceResponse()
+        response.say("Sorry, we encountered an error. Please try again later.", voice="alice")
+        return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
+
+
+@router.api_route("/agent-call", methods=["GET", "POST"])
+async def agent_call(request: Request):
+    """
+    Handle connection from Twilio AI Agent
+    Called by Twilio when the agent application connects
+    Sets up Media Stream to bridge to OpenAI Realtime API
+    """
+    try:
+        # Parse form data (POST) or query params (GET)
+        if request.method == "POST":
+            data = await request.form()
+        else:
+            data = request.query_params
+        
+        call_sid = data.get("CallSid")  # This is the agent's callSid (different from original)
+        if not call_sid:
+            print("❌ CallSid missing in agent-call")
+            return HTMLResponse("Error: CallSid missing", media_type="text/plain", status_code=400)
+        
+        from_number = data.get("From", "")
+        
+        original_call_sid = None
+        call_id = None
+        
+        # Look up call info from mapping for incoming calls
+        # Match by phone number (incoming calls only - outgoing calls use direct Media Stream)
+        matching_calls = [
+            (orig_sid, info) 
+            for orig_sid, info in incoming_call_mapping.items() 
+            if info.get("from") == from_number and not info.get("is_outgoing")
+        ]
+        
+        if matching_calls:
+            # Sort by timestamp (most recent first) and take the first one
+            matching_calls.sort(key=lambda x: x[1].get("timestamp", 0), reverse=True)
+            original_call_sid, call_info = matching_calls[0]
+            call_id = call_info.get("call_id")
+            
+            # Store mapping for Media Stream handler
+            agent_call_mapping[call_sid] = original_call_sid
+            
+            print(f"🤖 Agent call received (incoming): agentCallSid={call_sid}, originalCallSid={original_call_sid}, callId={call_id}")
+        else:
+            print(f"🤖 Agent call received: callSid={call_sid}, from={from_number} (no matching call found)")
+            # Fallback: try to look up by callSid in Next.js API
+            call_id = await fetch_call_id(call_sid)
+            if call_id:
+                print(f"   Found callId={call_id} via Next.js API lookup")
+            
+            # If we still don't have a callId, this is likely a duplicate or orphaned agent call
+            # Reject it to prevent it from showing up in the browser
+            if not call_id:
+                print(f"⚠️ Rejecting agent call without callId: callSid={call_sid}, from={from_number}")
+                twiml = VoiceResponse()
+                twiml.hangup()
+                return HTMLResponse(content=str(twiml), media_type="application/xml")
+        
+        # Generate TwiML
+        host = request.url.hostname
+        # Use WSS for production, WS for localhost
+        protocol = "wss" if "localhost" not in host and "127.0.0.1" not in host else "ws"
+        stream_url = f"{protocol}://{host}/media-stream/{call_sid}"
+        
+        print(f"📞 Setting up Media Stream for agent: stream_url={stream_url}")
+        
+        # Incoming call: Set up Media Stream (this bridges to OpenAI Realtime API)
+        twiml = VoiceResponse()
+        connect = Connect()
+        connect.stream(url=stream_url)
+        twiml.append(connect)
+        
+        # Keep call active
+        twiml.pause(length=3600)  # Pause for 1 hour (max call duration)
+        
+        return HTMLResponse(content=str(twiml), media_type="application/xml")
+    
+    except Exception as e:
+        print(f"❌ Error handling agent call: {e}")
+        import traceback
+        traceback.print_exc()
+        response = VoiceResponse()
+        response.say("Sorry, we encountered an error. Please try again later.", voice="alice")
+        return HTMLResponse(content=str(response), media_type="application/xml", status_code=500)
+
+
+@router.post("/initiate-call")
+async def initiate_ai_call(request: Request):
+    """
+    Initiate an AI call via Twilio
+    Called by Next.js to start an AI call
+    """
+    twilio_client = get_twilio_client()
+    if not twilio_client:
+        return JSONResponse(
+            {"error": "Twilio not configured"},
+            status_code=500
+        )
+    
+    try:
+        data = await request.json()
+        call_id = data.get("callId")
+        to_phone = data.get("toPhone")
+        from_phone = data.get("fromPhone", TWILIO_PHONE_NUMBER)
+        initial_prompts = data.get("initialPrompts", [])
+        
+        if not call_id or not to_phone:
+            return JSONResponse(
+                {"error": "callId and toPhone are required"},
+                status_code=400
+            )
+        
+        # Validate phone number format - must be E.164 format (starts with +)
+        # Reject Twilio Client identifiers (start with "client:")
+        if to_phone.startswith("client:"):
+            error_msg = f"Invalid phone number: '{to_phone}' appears to be a Twilio Client identifier, not a phone number. Phone numbers must be in E.164 format (e.g., +1234567890)"
+            print(f"❌ {error_msg}")
+            return JSONResponse(
+                {"error": error_msg},
+                status_code=400
+            )
+        
+        if not to_phone.startswith("+"):
+            error_msg = f"Invalid phone number format: '{to_phone}'. Phone numbers must be in E.164 format starting with '+' (e.g., +1234567890)"
+            print(f"❌ {error_msg}")
+            return JSONResponse(
+                {"error": error_msg},
+                status_code=400
+            )
+        
+        # Use inline TwiML with Connect/Stream (matching article approach)
+        raw_domain = AI_CALLING_SERVICE_URL or ""
+        domain = re.sub(r'(^\w+:|^)\/\/|\/+$', '', raw_domain)
+        
+        outbound_twiml = (
+            f'<?xml version="1.0" encoding="UTF-8"?>'
+            f'<Response><Connect><Stream url="wss://{domain}/media-stream/{call_id}" /></Connect></Response>'
+        )
+        
+        # Enable recording for outgoing AI calls
+        recording_callback = None
+        if call_id:
+            recording_callback = f"{APP_URL}/api/calls/recording-webhook?callId={call_id}"
+        
+        call = twilio_client.calls.create(
+            from_=from_phone,
+            to=to_phone,
+            twiml=outbound_twiml,
+            record=True,  # Enable recording
+            recording_status_callback=recording_callback,
+            recording_status_callback_method="POST",
+        )
+        
+        print(f"Call started with SID: {call.sid}")
+        
+        # Store mapping for Media Stream handler (both callId and callSid for lookups)
+        if call_id:
+            incoming_call_mapping[call_id] = {
+                "call_id": call_id,
+                "twilio_call_sid": call.sid,
+                "from": TWILIO_PHONE_NUMBER,
+                "to": to_phone,
+                "timestamp": time.time(),
+                "is_outgoing": True,
+                "initial_prompts": initial_prompts,  # Store initial prompts
+            }
+            incoming_call_mapping[call.sid] = {
+                "call_id": call_id,
+                "from": TWILIO_PHONE_NUMBER,
+                "to": to_phone,
+                "timestamp": time.time(),
+                "is_outgoing": True,
+                "initial_prompts": initial_prompts,  # Store initial prompts
+            }
+        
+        # Update call record in Next.js database
+        await update_call_record(call_id, call.sid, "RINGING")
+        
+        return JSONResponse({
+            "success": True,
+            "callSid": call.sid,
+            "status": "initiated",
+        })
+    
+    except Exception as e:
+        print(f"❌ Error initiating AI call: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500
+        )
+
