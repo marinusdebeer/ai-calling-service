@@ -167,14 +167,18 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                 
                 elif evt == "media" and openai_ws.open:
                     latest_ts = int(data["media"]["timestamp"])
+                    payload_size = len(data["media"]["payload"]) if "payload" in data["media"] else 0
+                    print(f"🎤 Received audio from Twilio: timestamp={latest_ts}, payload_size={payload_size} bytes")
                     await openai_ws.send(json.dumps({
                         "type": "input_audio_buffer.append",
                         "audio": data["media"]["payload"],
                     }))
+                    print(f"   ✅ Forwarded to OpenAI")
                 
                 elif evt == "start":
                     stream_sid = data["start"]["streamSid"]
                     print(f"📞 Media Stream started: streamSid={stream_sid}")
+                    print(f"   ✅ stream_sid is now set - audio can be sent to Twilio")
                 
                 elif evt == "stop":
                     print(f"🛑 Media Stream stopped - call ending")
@@ -190,7 +194,9 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                     break
                 else:
                     if evt not in ["connected", "media", "start", "stop"]:
-                        print(f"📨 Unknown Twilio event: {evt}, data: {data}")
+                        print(f"📨 Unknown Twilio event: {evt}")
+                        if evt:
+                            print(f"   Event data keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'}")
         except WebSocketDisconnect as e:
             print(f"🔌 Twilio WebSocket disconnected in recv_twilio - call ending")
             print(f"   CallSid: {call_sid}, Error: {e}")
@@ -212,33 +218,47 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     async def send_twilio():
         """Receive messages from OpenAI and forward to Twilio"""
         nonlocal response_start_ts, last_item, stream_sid
+        print(f"🎧 Starting send_twilio loop (stream_sid={stream_sid or 'NOT SET YET'})")
         try:
             async for raw in openai_ws:
                 msg = json.loads(raw)
                 typ = msg.get("type")
                 
+                # Log all OpenAI message types for debugging
+                if typ not in ["response.audio.delta", "input_audio_buffer.speech_started", 
+                              "conversation.item.input_audio_transcription.completed", 
+                              "response.audio_transcript.done", "response.text.done"]:
+                    print(f"📨 OpenAI message type: {typ}")
+                
                 # Handle audio delta events - OpenAI sends "response.audio.delta"
-                if typ == "response.audio.delta" and msg.get("delta") and stream_sid:
-                    try:
-                        # Decode from base64 (OpenAI sends it base64-encoded)
-                        decoded_audio = base64.b64decode(msg["delta"])
-                        # Re-encode to base64 (Twilio expects base64-encoded audio)
-                        audio_payload = base64.b64encode(decoded_audio).decode('utf-8')
-                        audio_delta = {
-                            "event": "media",
-                            "streamSid": stream_sid,
-                            "media": {
-                                "payload": audio_payload
+                if typ == "response.audio.delta":
+                    delta_size = len(msg.get("delta", "")) if msg.get("delta") else 0
+                    if not msg.get("delta"):
+                        print(f"⚠️ OpenAI sent audio delta with no delta data")
+                    elif not stream_sid:
+                        print(f"⚠️ OpenAI sent audio delta but stream_sid not set yet (delta_size={delta_size})")
+                    else:
+                        try:
+                            # Decode from base64 (OpenAI sends it base64-encoded)
+                            decoded_audio = base64.b64decode(msg["delta"])
+                            # Re-encode to base64 (Twilio expects base64-encoded audio)
+                            audio_payload = base64.b64encode(decoded_audio).decode('utf-8')
+                            audio_delta = {
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {
+                                    "payload": audio_payload
+                                }
                             }
-                        }
-                        await websocket.send_json(audio_delta)
-                    except (RuntimeError, WebSocketDisconnect):
-                        print("Twilio WebSocket closed; stopping send_twilio loop")
-                        break
-                    except Exception as e:
-                        print(f"Error sending audio to Twilio: {e}")
-                        import traceback
-                        traceback.print_exc()
+                            await websocket.send_json(audio_delta)
+                            print(f"🔊 Sent audio to Twilio: delta_size={delta_size}, streamSid={stream_sid}")
+                        except (RuntimeError, WebSocketDisconnect):
+                            print("Twilio WebSocket closed; stopping send_twilio loop")
+                            break
+                        except Exception as e:
+                            print(f"❌ Error sending audio to Twilio: {e}")
+                            import traceback
+                            traceback.print_exc()
                     
                     if response_start_ts is None:
                         response_start_ts = latest_ts
