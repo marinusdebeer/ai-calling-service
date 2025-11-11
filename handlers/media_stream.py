@@ -46,8 +46,6 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     initial_prompts = []
     if call_sid in incoming_call_mapping:
         initial_prompts = incoming_call_mapping[call_sid].get("initial_prompts", [])
-        if initial_prompts:
-            print(f"📝 Found {len(initial_prompts)} initial prompt(s) for call")
     
     # Connect to OpenAI immediately with initial prompts
     # Note: We'll update active_connections with actual_call_sid once we get it from WebSocket
@@ -80,17 +78,13 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     call_id = None  # Store callId for transcript updates
     
     # Path param might be callId (for incoming calls) or callSid (for outgoing)
-    # Check if it's already a callId by looking in mapping or checking if it looks like a Prisma ID
     # Prisma IDs typically start with 'cm' and are longer alphanumeric strings
     if call_sid.startswith('cm') and len(call_sid) > 20:
         # Likely a Prisma callId - use it directly
         call_id = call_sid
-        print(f"✅ Using path param as callId: {call_id}")
     else:
         # Likely a Twilio callSid - try to fetch callId
         call_id = await fetch_call_id(call_sid)
-        if call_id:
-            print(f"✅ Found callId={call_id} for callSid={call_sid}")
     
     if call_id:
         # Update call status to IN_PROGRESS when media stream connects
@@ -125,10 +119,6 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                 data = json.loads(msg)
                 evt = data.get("event")
                 
-                # Log all events for debugging (except media which is too verbose)
-                if evt != "media":
-                    print(f"📨 Twilio event: {evt} (callId={call_id or 'N/A'})")
-                
                 if evt == "connected":
                     # Extract actual callSid from WebSocket connection data
                     event_call_sid = (
@@ -138,29 +128,20 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                     )
                     actual_call_sid = event_call_sid
                     if actual_call_sid:
-                        print(f"📞 Twilio Media Stream connected: callSid={actual_call_sid}, callId={call_id or 'N/A'}")
-                    else:
-                        print(f"📞 Twilio Media Stream connected: path_param={call_sid}, callId={call_id or 'N/A'}")
+                        print(f"📞 Twilio Media Stream connected: callSid={actual_call_sid}")
                     
-                    # Now try to get initial prompts using actual callSid
+                    # Try to get initial prompts using actual callSid
                     if actual_call_sid and actual_call_sid != call_sid:
                         if actual_call_sid in incoming_call_mapping:
                             prompts = incoming_call_mapping[actual_call_sid].get("initial_prompts", [])
                             if prompts:
                                 initial_prompts = prompts
-                                print(f"📝 Found {len(initial_prompts)} initial prompt(s) using callSid={actual_call_sid}")
                     
                     # Update call_id if we have actual_call_sid and don't have it yet
-                    # (This handles the case where path param was a callSid, not a callId)
                     if actual_call_sid and not call_id:
                         call_id = await fetch_call_id(actual_call_sid)
                         if call_id:
-                            print(f"✅ Found callId={call_id} for callSid={actual_call_sid}")
-                            # Update call status to IN_PROGRESS now that we have callId
                             await update_call_status(call_id, "IN_PROGRESS", answered_at=int(time.time() * 1000))
-                    elif call_id and not actual_call_sid:
-                        # We have callId but no callSid yet - this is fine, we'll use callId for transcripts
-                        print(f"✅ Using callId={call_id} (no callSid in connected event)")
                     
                     # Update active_connections to use actual_call_sid if different
                     if actual_call_sid and actual_call_sid != call_sid:
@@ -258,23 +239,16 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                 elif typ == "conversation.item.input_audio_transcription.completed":
                     # Caller speaking (user input) - complete transcription
                     transcript = msg.get("transcript", "")
-                    if transcript and transcript.strip():
+                    if transcript and transcript.strip() and call_id:
                         print(f"📝 Caller transcript: {transcript}")
-                        if call_id:
-                            await send_transcript(call_id, transcript.strip(), "caller")
-                        else:
-                            print(f"⚠️ Cannot send transcript: call_id is None")
+                        await send_transcript(call_id, transcript.strip(), "caller")
                 
                 elif typ == "response.audio_transcript.done":
                     # AI speaking (assistant output) - complete transcription
-                    # This is the final, complete transcript - send only this
                     transcript = msg.get("transcript", "")
-                    if transcript and transcript.strip():
+                    if transcript and transcript.strip() and call_id:
                         print(f"📝 AI transcript: {transcript}")
-                        if call_id:
-                            await send_transcript(call_id, transcript.strip(), "ai")
-                        else:
-                            print(f"⚠️ Cannot send transcript: call_id is None")
+                        await send_transcript(call_id, transcript.strip(), "ai")
                 
                 elif typ == "response.text.done":
                     # This is the AI's text response (alternative to audio transcription)
