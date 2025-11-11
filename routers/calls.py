@@ -156,21 +156,21 @@ async def agent_call(request: Request):
         # Fallback to request hostname for local development
         if AI_CALLING_SERVICE_URL:
             raw_domain = AI_CALLING_SERVICE_URL
-            # Properly extract domain - remove protocol and trailing slashes
+            # Properly extract domain - remove protocol and trailing slashes, strip all whitespace
             if raw_domain.startswith('https://'):
-                domain = raw_domain[8:].rstrip('/')  # Remove 'https://' and trailing /
+                domain = raw_domain[8:].rstrip('/').strip()  # Remove 'https://' and trailing /
             elif raw_domain.startswith('http://'):
-                domain = raw_domain[7:].rstrip('/')  # Remove 'http://' and trailing /
+                domain = raw_domain[7:].rstrip('/').strip()  # Remove 'http://' and trailing /
             else:
-                domain = raw_domain.rstrip('/')
+                domain = raw_domain.rstrip('/').strip()
             # Use WSS for production URLs, WS for localhost
             protocol = "wss" if "localhost" not in domain and "127.0.0.1" not in domain else "ws"
-            stream_url = f"{protocol}://{domain}/media-stream/{call_id}"
+            stream_url = f"{protocol}://{domain}/media-stream/{call_id}".strip().replace('\n', '').replace('\r', '')
         else:
             # Fallback for local development
             host = request.url.hostname
             protocol = "wss" if "localhost" not in host and "127.0.0.1" not in host else "ws"
-            stream_url = f"{protocol}://{host}/media-stream/{call_id}"
+            stream_url = f"{protocol}://{host}/media-stream/{call_id}".strip().replace('\n', '').replace('\r', '')
         
         print(f"📞 Setting up Media Stream for agent: stream_url={stream_url}")
         print(f"   Using AI_CALLING_SERVICE_URL: {AI_CALLING_SERVICE_URL}")
@@ -249,13 +249,13 @@ async def initiate_ai_call(request: Request):
         # in the WebSocket connection data. The handler will extract callSid from the
         # WebSocket "connected" event and use that to look up the mapping.
         raw_domain = AI_CALLING_SERVICE_URL or ""
-        # Properly extract domain - remove protocol and trailing slashes
+        # Properly extract domain - remove protocol and trailing slashes, strip all whitespace
         if raw_domain.startswith('https://'):
-            domain = raw_domain[8:].rstrip('/')  # Remove 'https://' and trailing /
+            domain = raw_domain[8:].rstrip('/').strip()  # Remove 'https://' and trailing /
         elif raw_domain.startswith('http://'):
-            domain = raw_domain[7:].rstrip('/')  # Remove 'http://' and trailing /
+            domain = raw_domain[7:].rstrip('/').strip()  # Remove 'http://' and trailing /
         else:
-            domain = raw_domain.rstrip('/')
+            domain = raw_domain.rstrip('/').strip()
         
         # Also, ensure call_id is URL-safe (no special characters)
         # The call_id should already be safe, but let's make sure
@@ -269,7 +269,8 @@ async def initiate_ai_call(request: Request):
 
         # Use call_id in URL - handler will get actual callSid from WebSocket connection
         # Use Twilio's VoiceResponse to ensure proper XML encoding
-        stream_url = f"wss://{domain}/media-stream/{call_id}"
+        # Strip any whitespace/newlines from URL to prevent XML encoding issues
+        stream_url = f"wss://{domain}/media-stream/{call_id}".strip().replace('\n', '').replace('\r', '')
         twiml_response = VoiceResponse()
         connect = Connect()
         connect.stream(url=stream_url)
