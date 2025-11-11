@@ -27,40 +27,45 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     Uses call_sid as path parameter (Twilio doesn't pass query params in WebSocket URLs)
     For outgoing calls, call_sid might be callId (from inline TwiML) or actual callSid
     """
-    print(f"📡 WebSocket connection attempt: callSid={call_sid}")
+    print(f"📡 WebSocket connection attempt: path_param={call_sid}")
     print(f"   WebSocket client: {websocket.client if hasattr(websocket, 'client') else 'N/A'}")
     print(f"   WebSocket URL: {websocket.url if hasattr(websocket, 'url') else 'N/A'}")
     
+    # Note: call_sid from path might be callId (for outgoing) or callSid (for incoming)
+    # We'll get the actual callSid from the WebSocket "connected" event
+    
     try:
         await websocket.accept()
-        print(f"✅ WebSocket accepted: callSid={call_sid}")
+        print(f"✅ WebSocket accepted: path_param={call_sid}")
     except Exception as e:
         print(f"❌ Failed to accept WebSocket: {e}")
         import traceback
         traceback.print_exc()
         return
     
-    print(f"🔌 Twilio Media Stream connected: callSid={call_sid}")
+    print(f"🔌 Twilio Media Stream WebSocket accepted: path_param={call_sid}")
+    print(f"   Waiting for 'connected' event to get actual callSid...")
     
     openai_ws = None
+    actual_call_sid = None  # Will be set from WebSocket connected event
     
-    # Get initial prompts from mapping if available
-    # For outgoing calls, call_sid is the callId from the TwiML URL
+    # Try to get initial prompts from mapping using path param (might be callId or callSid)
     initial_prompts = []
     if call_sid in incoming_call_mapping:
         initial_prompts = incoming_call_mapping[call_sid].get("initial_prompts", [])
-        print(f"📝 Found {len(initial_prompts)} initial prompt(s) for call_sid={call_sid}")
+        print(f"📝 Found {len(initial_prompts)} initial prompt(s) for path_param={call_sid}")
     else:
-        print(f"⚠️ No mapping found for call_sid={call_sid}, checking all mappings...")
-        # Debug: print all keys in mapping
-        print(f"Available keys in mapping: {list(incoming_call_mapping.keys())[:10]}")  # First 10 keys
+        print(f"⚠️ No mapping found for path_param={call_sid}")
+        print(f"   Available keys in mapping: {list(incoming_call_mapping.keys())[:10]}")
+        print(f"   Will try to get callSid from WebSocket 'connected' event...")
     
     # Connect to OpenAI immediately with initial prompts
-    print(f"🤖 Connecting to OpenAI for callSid={call_sid}...")
+    # Note: We'll update active_connections with actual_call_sid once we get it from WebSocket
+    print(f"🤖 Connecting to OpenAI (path_param={call_sid})...")
     try:
         # Pass initial prompts to session initialization so they're in the instructions
         openai_ws = await connect_to_openai_realtime(initial_prompts=initial_prompts)
-        # Store connection for admin prompts
+        # Store connection for admin prompts (will update with actual_call_sid later)
         active_connections[call_sid] = openai_ws
         
         # Send initial greeting that incorporates the prompts
@@ -86,13 +91,15 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     last_item = None
     call_id = None  # Store callId for transcript updates
     
-    # Fetch callId at the start
+    # Try to fetch callId using path param (might be callId or callSid)
     call_id = await fetch_call_id(call_sid)
     if call_id:
+        print(f"   ✅ Found callId={call_id} using path_param={call_sid}")
         # Update call status to IN_PROGRESS when media stream connects
         await update_call_status(call_id, "IN_PROGRESS", answered_at=int(time.time() * 1000))
     else:
-        print(f"⚠️ Could not find callId for callSid={call_sid}")
+        print(f"   ⚠️ Could not find callId for path_param={call_sid}")
+        print(f"   Will try again after getting actual callSid from WebSocket...")
     
     async def on_speech_started():
         """Handle user interruption - cancel OpenAI's current response"""
@@ -117,20 +124,46 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     
     async def recv_twilio():
         """Receive messages from Twilio and forward to OpenAI"""
-        nonlocal stream_sid, latest_ts
+        nonlocal stream_sid, latest_ts, actual_call_sid, call_id
         try:
             async for msg in websocket.iter_text():
                 data = json.loads(msg)
                 evt = data.get("event")
                 
                 if evt == "connected":
-                    # Log connected event
+                    # Extract actual callSid from WebSocket connection data
                     event_call_sid = (
                         data.get("start", {}).get("callSid") or
                         data.get("callSid") or
                         data.get("CallSid")
                     )
-                    print(f"📞 Twilio Media Stream connected event: callSid={event_call_sid}")
+                    actual_call_sid = event_call_sid
+                    print(f"📞 Twilio Media Stream 'connected' event received:")
+                    print(f"   Actual callSid from WebSocket: {actual_call_sid}")
+                    print(f"   Path param was: {call_sid}")
+                    print(f"   Full event data: {json.dumps(data, indent=2)}")
+                    
+                    # Now try to get initial prompts using actual callSid
+                    if actual_call_sid and actual_call_sid != call_sid:
+                        if actual_call_sid in incoming_call_mapping:
+                            prompts = incoming_call_mapping[actual_call_sid].get("initial_prompts", [])
+                            if prompts:
+                                initial_prompts = prompts
+                                print(f"📝 Found {len(initial_prompts)} initial prompt(s) using actual callSid={actual_call_sid}")
+                    
+                    # Update call_id if we have actual_call_sid and don't have it yet
+                    if actual_call_sid and not call_id:
+                        call_id = await fetch_call_id(actual_call_sid)
+                        if call_id:
+                            print(f"   ✅ Found callId={call_id} for callSid={actual_call_sid}")
+                            # Update call status to IN_PROGRESS now that we have callId
+                            await update_call_status(call_id, "IN_PROGRESS", answered_at=int(time.time() * 1000))
+                    
+                    # Update active_connections to use actual_call_sid if different
+                    if actual_call_sid and actual_call_sid != call_sid:
+                        if call_sid in active_connections:
+                            active_connections[actual_call_sid] = active_connections.pop(call_sid)
+                            print(f"   ✅ Updated active_connections: {call_sid} → {actual_call_sid}")
                 
                 elif evt == "media" and openai_ws.open:
                     latest_ts = int(data["media"]["timestamp"])
@@ -257,17 +290,30 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
         import traceback
         traceback.print_exc()
     finally:
-        print(f"🔌 AI call ended, cleaning up for callSid={call_sid}, callId={call_id}")
-        # Clean up mappings
-        if call_sid in agent_call_mapping:
-            original_call_sid = agent_call_mapping[call_sid]
-            del agent_call_mapping[call_sid]
+        # Use actual_call_sid if we have it, otherwise use path param
+        cleanup_sid = actual_call_sid if actual_call_sid else call_sid
+        print(f"🔌 AI call ended, cleaning up:")
+        print(f"   Path param: {call_sid}")
+        print(f"   Actual callSid: {actual_call_sid or 'N/A'}")
+        print(f"   CallId: {call_id or 'N/A'}")
+        print(f"   Using {cleanup_sid} for cleanup")
+        
+        # Clean up mappings using actual_call_sid if available
+        if cleanup_sid in agent_call_mapping:
+            original_call_sid = agent_call_mapping[cleanup_sid]
+            del agent_call_mapping[cleanup_sid]
             # Clean up incoming call mapping
             if original_call_sid in incoming_call_mapping:
                 del incoming_call_mapping[original_call_sid]
         
-        # Remove from active connections
-        if call_sid in active_connections:
+        # Also clean up by path param if different
+        if call_sid != cleanup_sid and call_sid in agent_call_mapping:
+            del agent_call_mapping[call_sid]
+        
+        # Remove from active connections (try both)
+        if cleanup_sid in active_connections:
+            del active_connections[cleanup_sid]
+        if call_sid != cleanup_sid and call_sid in active_connections:
             del active_connections[call_sid]
         
         # Update call status to COMPLETED

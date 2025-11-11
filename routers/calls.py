@@ -238,14 +238,23 @@ async def initiate_ai_call(request: Request):
                 status_code=400
             )
         
-        # Use inline TwiML with Connect/Stream (matching article approach)
+        # Use inline TwiML with Connect/Stream
+        # Note: We use call_id in the URL path, but Twilio will send the actual callSid
+        # in the WebSocket connection data. The handler will extract callSid from the
+        # WebSocket "connected" event and use that to look up the mapping.
         raw_domain = AI_CALLING_SERVICE_URL or ""
         domain = re.sub(r'(^\w+:|^)\/\/|\/+$', '', raw_domain)
         
+        # Use call_id in URL - handler will get actual callSid from WebSocket connection
         outbound_twiml = (
             f'<?xml version="1.0" encoding="UTF-8"?>'
             f'<Response><Connect><Stream url="wss://{domain}/media-stream/{call_id}" /></Connect></Response>'
         )
+        
+        print(f"📋 Generated TwiML for outgoing call:")
+        print(f"   {outbound_twiml}")
+        print(f"   WebSocket URL: wss://{domain}/media-stream/{call_id}")
+        print(f"   Note: Twilio will send actual callSid in WebSocket connection data")
         
         # Enable recording for outgoing AI calls
         recording_callback = None
@@ -261,27 +270,32 @@ async def initiate_ai_call(request: Request):
             recording_status_callback_method="POST",
         )
         
-        print(f"Call started with SID: {call.sid}")
+        call_sid = call.sid
+        print(f"✅ Call started with SID: {call_sid}")
+        print(f"   Mapping: callSid={call_sid} → callId={call_id}")
         
-        # Store mapping for Media Stream handler (both callId and callSid for lookups)
+        # Store mapping for Media Stream handler
+        # The handler receives call_id in URL path, but needs to map to callSid
+        # Store by both call_id (for URL lookup) and callSid (for WebSocket data lookup)
         if call_id:
             incoming_call_mapping[call_id] = {
                 "call_id": call_id,
-                "twilio_call_sid": call.sid,
+                "twilio_call_sid": call_sid,
                 "from": TWILIO_PHONE_NUMBER,
                 "to": to_phone,
                 "timestamp": time.time(),
                 "is_outgoing": True,
-                "initial_prompts": initial_prompts,  # Store initial prompts
+                "initial_prompts": initial_prompts,
             }
-            incoming_call_mapping[call.sid] = {
+            incoming_call_mapping[call_sid] = {
                 "call_id": call_id,
                 "from": TWILIO_PHONE_NUMBER,
                 "to": to_phone,
                 "timestamp": time.time(),
                 "is_outgoing": True,
-                "initial_prompts": initial_prompts,  # Store initial prompts
+                "initial_prompts": initial_prompts,
             }
+            print(f"📝 Stored mappings: callId={call_id} and callSid={call_sid}")
         
         # Update call record in Next.js database
         await update_call_record(call_id, call.sid, "RINGING")
