@@ -358,9 +358,9 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                         
                         # Handle send_request_form function
                         if function_name == "send_request_form" and call_id:
-                            # All information (clientId, phone number) is automatically retrieved from call record
-                            # No parameters needed - the API will get everything from the call
-                            result = await send_request_form(call_id)
+                            # Extract destination parameter (defaults to "request_form" if not provided)
+                            destination = function_arguments.get("destination", "request_form")
+                            result = await send_request_form(call_id, destination)
                             
                             # Send function result back to OpenAI
                             function_result = {

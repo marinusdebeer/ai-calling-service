@@ -258,19 +258,26 @@ async def forward_recording_webhook(call_id: str | None, form_data: dict):
         traceback.print_exc()
 
 
-async def send_request_form(call_id: str) -> dict:
-    """Send request form link via SMS to the caller.
+async def send_request_form(call_id: str, destination: str = "request_form") -> dict:
+    """Send a link via SMS to the caller.
     
     All information (clientId, phone number) is automatically retrieved from the call record.
-    No parameters needed - the API will get everything from the call.
+    
+    Args:
+        call_id: The call ID
+        destination: Where to send the caller - "website", "request_form", or "gift_card_form"
     """
     if not call_id:
         return {"success": False, "error": "call_id is required"}
     
+    # Validate destination
+    valid_destinations = ["website", "request_form", "gift_card_form"]
+    if destination not in valid_destinations:
+        destination = "request_form"  # Default to request_form if invalid
+    
     try:
         async with httpx.AsyncClient() as client:
-            # No payload needed - API will get everything from call record
-            payload = {}
+            payload = {"destination": destination}
             
             response = await client.post(
                 f"{APP_URL}/api/calls/{call_id}/send-request-form",
@@ -280,15 +287,15 @@ async def send_request_form(call_id: str) -> dict:
             
             if response.status_code == 200:
                 data = response.json()
-                print(f"✅ Request form sent successfully: {data.get('url', 'N/A')}")
+                print(f"✅ Link sent successfully ({destination}): {data.get('url', 'N/A')}")
                 return {"success": True, "url": data.get("url")}
             else:
                 error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
                 error_msg = error_data.get("error", f"HTTP {response.status_code}")
-                print(f"⚠️ Failed to send request form: {error_msg}")
+                print(f"⚠️ Failed to send link: {error_msg}")
                 return {"success": False, "error": error_msg}
     except Exception as e:
-        print(f"❌ Error sending request form: {e}")
+        print(f"❌ Error sending link: {e}")
         import traceback
         traceback.print_exc()
         return {"success": False, "error": str(e)}

@@ -56,10 +56,16 @@ async def initialize_session(openai_ws, initial_prompts=None):
         {
             "type": "function",
             "name": "send_request_form",
-            "description": "Send a text message with a link to the request form to the caller. Use this when a new lead or existing client needs to fill out the request form to provide their service details. The form link will be sent via SMS to the caller's phone number (which is automatically retrieved from the call). You don't need to provide any parameters - the system knows who to send it to from the call context.",
+            "description": "Send a text message with a link to the caller. Use this to send them to the website homepage, the request form, or the gift card form. The link will be sent via SMS to the caller's phone number (which is automatically retrieved from the call). Choose the destination based on what the caller needs: 'website' for general information, 'request_form' for service requests, or 'gift_card_form' for purchasing gift cards.",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "destination": {
+                        "type": "string",
+                        "enum": ["website", "request_form", "gift_card_form"],
+                        "description": "Where to send the caller: 'website' for the homepage, 'request_form' for service requests, or 'gift_card_form' for gift card purchases. Defaults to 'request_form' if not specified."
+                    }
+                },
                 "required": []
             }
         },
