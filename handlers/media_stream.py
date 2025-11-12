@@ -6,7 +6,7 @@ import base64
 import asyncio
 import time
 from fastapi import WebSocket, WebSocketDisconnect
-from services.openai_service import connect_to_openai_realtime, send_initial_greeting
+from services.openai_service import connect_to_openai_realtime
 from services.nextjs_client import (
     fetch_call_id,
     fetch_call_details,
@@ -14,6 +14,8 @@ from services.nextjs_client import (
     send_transcript,
     update_call_metadata,
     update_call_record,
+    send_request_form,
+    end_call as end_call_api,
 )
 from state import (
     active_connections,
@@ -31,6 +33,22 @@ from utils.constants import (
 )
 from utils.call_utils import is_prisma_call_id
 from utils.transcript_utils import check_and_send_initial_prompts
+
+
+async def execute_end_call(function_call_id: str, call_id: str, original_twilio_call_sid: str | None, openai_ws):
+    """Execute the end_call function - terminates call and closes connection"""
+    # Now end the call via API (terminates original Twilio call and updates status)
+    # This will end both the caller and agent sides
+    end_result = await end_call_api(call_id, original_twilio_call_sid)
+    
+    # Close the OpenAI WebSocket connection
+    # This will trigger the finally block which handles final cleanup
+    if openai_ws and openai_ws.open:
+        try:
+            await openai_ws.close()
+            print(f"🔌 Call ended by AI - closing connection")
+        except Exception as e:
+            print(f"⚠️ Error closing OpenAI connection: {e}")
 
 
 async def handle_media_stream(websocket: WebSocket, call_sid: str):
@@ -55,10 +73,17 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     openai_ws = None
     actual_call_sid = None  # Will be set from WebSocket connected event
     
-    # Try to get initial prompts from mapping using path param (might be callId or callSid)
+    # Try to get initial prompts, clientId, and phone number from mapping using path param (might be callId or callSid)
     initial_prompts = []
+    client_id = None
+    phone_number = None
     if call_sid in incoming_call_mapping:
-        initial_prompts = incoming_call_mapping[call_sid].get("initial_prompts", [])
+        mapping = incoming_call_mapping[call_sid]
+        initial_prompts = mapping.get("initial_prompts", [])
+        client_id = mapping.get("client_id")
+        phone_number = mapping.get("to") or mapping.get("from")
+        if client_id or phone_number:
+            print(f"📋 Call info from mapping: clientId={client_id}, phoneNumber={phone_number}")
     
     # Connect to OpenAI immediately with initial prompts
     # Note: We'll update active_connections with actual_call_sid once we get it from WebSocket
@@ -68,9 +93,8 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
         # Store connection for admin prompts (will update with actual_call_sid later)
         active_connections[call_sid] = openai_ws
         
-        # Send initial greeting that incorporates the prompts
-        await send_initial_greeting(openai_ws, initial_prompts)
-        print(f"✅ Connected to OpenAI and sent initial greeting")
+        # AI will automatically greet based on instructions (no explicit greeting message needed)
+        print(f"✅ Connected to OpenAI - AI will greet automatically based on instructions")
     except Exception as e:
         print(f"❌ Failed to connect to OpenAI: {e}")
         import traceback
@@ -90,6 +114,7 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     last_item = None
     call_id = None  # Store callId for transcript updates
     initial_prompts_sent = False  # Track if we've already sent initial prompts as transcripts
+    ai_response_active = False  # Track if AI is currently speaking/responding
     
     # Path param might be callId (for incoming calls) or callSid (for outgoing)
     # Use utility function to detect Prisma callId format
@@ -149,12 +174,20 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                     if actual_call_sid:
                         print(f"📞 Twilio Media Stream connected: callSid={actual_call_sid}")
                     
-                    # Try to get initial prompts using actual callSid
+                    # Try to get initial prompts, clientId, and phone number using actual callSid
                     if actual_call_sid and actual_call_sid != call_sid:
                         if actual_call_sid in incoming_call_mapping:
-                            prompts = incoming_call_mapping[actual_call_sid].get("initial_prompts", [])
+                            mapping = incoming_call_mapping[actual_call_sid]
+                            prompts = mapping.get("initial_prompts", [])
                             if prompts:
                                 initial_prompts = prompts
+                            # Update clientId and phone number from mapping if available
+                            if mapping.get("client_id"):
+                                client_id = mapping.get("client_id")
+                            if mapping.get("to") or mapping.get("from"):
+                                phone_number = mapping.get("to") or mapping.get("from")
+                            if client_id or phone_number:
+                                print(f"📋 Updated call info from actual_call_sid mapping: clientId={client_id}, phoneNumber={phone_number}")
                                 # Send initial prompts as transcript entries if we haven't already
                                 if call_id and prompts and not initial_prompts_sent:
                                     await check_and_send_initial_prompts(call_id, prompts, None, send_transcript, initial_prompts_sent)
@@ -226,14 +259,17 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     
     async def send_twilio():
         """Receive messages from OpenAI and forward to Twilio"""
-        nonlocal response_start_ts, last_item, stream_sid
+        nonlocal response_start_ts, last_item, stream_sid, ai_response_active, actual_call_sid
         try:
             async for raw in openai_ws:
                 msg = json.loads(raw)
                 typ = msg.get("type")
+                # if typ != "response.audio.delta" and typ != "response.audio_transcript.delta":
+                #     print(f"\nType: {typ}\n")
                 
                 # Handle audio delta events - OpenAI sends "response.audio.delta"
                 if typ == "response.audio.delta":
+                    ai_response_active = True  # AI is speaking
                     if not msg.get("delta"):
                         print(f"⚠️ OpenAI sent audio delta with no delta data")
                     elif not stream_sid:
@@ -265,6 +301,15 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                     if item_id := msg.get("item_id"):
                         last_item = item_id
                 
+                elif typ == "response.created":
+                    # AI started a new response
+                    ai_response_active = True
+                
+                elif typ == "response.output_audio.done":
+                    # AI finished speaking/responding
+                    ai_response_active = False
+                    print(f"✅ AI response completed")
+                
                 elif typ == "input_audio_buffer.speech_started":
                     await on_speech_started()
                 
@@ -281,6 +326,9 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                     if transcript and transcript.strip() and call_id:
                         print(f"📝 AI transcript: {transcript}")
                         await send_transcript(call_id, transcript.strip(), SPEAKER_AI)
+                    # Note: Don't set ai_response_active = False here
+                    # The transcript is done, but audio might still be streaming
+                    # Wait for response.done to handle pending_end_call
                 
                 elif typ == "response.text.done":
                     # This is the AI's text response (alternative to audio transcription)
@@ -289,6 +337,124 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                         print(f"📝 AI text response (callSid={call_sid}): {text}")
                         # Send to Next.js for real-time display
                         await send_transcript(call_id, text, SPEAKER_AI)
+                    # Note: Don't set ai_response_active = False here
+                    # Wait for response.done to handle pending_end_call
+                
+                elif typ == "conversation.item.created":
+                    # Check if this is a function call created by the AI
+                    item = msg.get("item", {})
+                    if item.get("type") == "function_call":
+                        function_call_id = item.get("id")
+                        function_name = item.get("name")
+                        function_arguments_str = item.get("arguments", "{}")
+                        
+                        # Parse function arguments (they come as a JSON string)
+                        try:
+                            function_arguments = json.loads(function_arguments_str) if isinstance(function_arguments_str, str) else function_arguments_str
+                        except json.JSONDecodeError:
+                            function_arguments = {}
+                        
+                        print(f"🔧 Function call: {function_name} with args: {function_arguments}")
+                        
+                        # Handle send_request_form function
+                        if function_name == "send_request_form" and call_id:
+                            # All information (clientId, phone number) is automatically retrieved from call record
+                            # No parameters needed - the API will get everything from the call
+                            result = await send_request_form(call_id)
+                            
+                            # Send function result back to OpenAI
+                            function_result = {
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": function_call_id,
+                                    "output": json.dumps(result)
+                                }
+                            }
+                            # await openai_ws.send(json.dumps(function_result))
+                            await openai_ws.send(json.dumps({"type": "response.create"}))
+                            print(f"✅ Function result sent for {function_name}: {result}")
+                        
+                        # Handle end_call function
+                        elif function_name == "end_call":
+                            # Properly end the call by terminating Twilio call and updating status
+                            if call_id:
+                                # Get the original Twilio call SID from the database
+                                # This is the caller's call SID (for incoming) or the actual call SID (for outgoing)
+                                # We need to terminate the ORIGINAL call, not the agent's call, to end both parties
+                                original_twilio_call_sid = None
+                                
+                                # First, try to get from call details in database
+                                call_details = await fetch_call_details(call_id)
+                                if call_details:
+                                    call_data = call_details.get("call", {})
+                                    original_twilio_call_sid = call_data.get("twilioCallSid")
+                                
+                                # If not found in database, try to get from mapping
+                                if not original_twilio_call_sid:
+                                    # For incoming calls: find the original call SID (not agent's)
+                                    if actual_call_sid in agent_call_mapping:
+                                        # This is an agent call SID, get the original
+                                        original_twilio_call_sid = agent_call_mapping[actual_call_sid]
+                                    elif call_sid in incoming_call_mapping:
+                                        # Path param might be the original call SID
+                                        original_twilio_call_sid = call_sid
+                                    elif actual_call_sid:
+                                        # For outgoing calls, actual_call_sid is the original
+                                        original_twilio_call_sid = actual_call_sid
+                                
+                                # Send function result back to OpenAI immediately
+                                result = {"success": True, "message": "Call ending"}
+                                function_result = {
+                                    "type": "conversation.item.create",
+                                    "item": {
+                                        "type": "function_call_output",
+                                        "call_id": function_call_id,
+                                        "output": json.dumps(result)
+                                    }
+                                }
+                                
+                                # Send result while connection is still open
+                                if openai_ws and openai_ws.open:
+                                    try:
+                                        await openai_ws.send(json.dumps(function_result))
+                                        print(f"✅ Function result sent for {function_name}: {result}")
+                                    except Exception as e:
+                                        print(f"⚠️ Error sending function result: {e}")
+                                
+                                # Execute end_call immediately
+                                await execute_end_call(function_call_id, call_id, original_twilio_call_sid, openai_ws)
+                                
+                            else:
+                                # No call_id available - send error
+                                result = {"success": False, "error": "Call ID not available"}
+                                function_result = {
+                                    "type": "conversation.item.create",
+                                    "item": {
+                                        "type": "function_call_output",
+                                        "call_id": function_call_id,
+                                        "output": json.dumps(result)
+                                    }
+                                }
+                                if openai_ws and openai_ws.open:
+                                    try:
+                                        await openai_ws.send(json.dumps(function_result))
+                                        print(f"⚠️ Cannot end call: call_id not available")
+                                    except Exception as e:
+                                        print(f"⚠️ Error sending error result: {e}")
+                        
+                        else:
+                            # Unknown function - send error
+                            function_result = {
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": function_call_id,
+                                    "output": json.dumps({"success": False, "error": f"Unknown function: {function_name}"})
+                                }
+                            }
+                            await openai_ws.send(json.dumps(function_result))
+                            print(f"⚠️ Unknown function called: {function_name}")
         except WebSocketDisconnect as e:
             print(f"🔌 OpenAI WebSocket disconnected - call ending")
         except Exception as e:

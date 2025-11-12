@@ -257,3 +257,89 @@ async def forward_recording_webhook(call_id: str | None, form_data: dict):
         import traceback
         traceback.print_exc()
 
+
+async def send_request_form(call_id: str) -> dict:
+    """Send request form link via SMS to the caller.
+    
+    All information (clientId, phone number) is automatically retrieved from the call record.
+    No parameters needed - the API will get everything from the call.
+    """
+    if not call_id:
+        return {"success": False, "error": "call_id is required"}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            # No payload needed - API will get everything from call record
+            payload = {}
+            
+            response = await client.post(
+                f"{APP_URL}/api/calls/{call_id}/send-request-form",
+                json=payload,
+                timeout=10.0
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ Request form sent successfully: {data.get('url', 'N/A')}")
+                return {"success": True, "url": data.get("url")}
+            else:
+                error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                error_msg = error_data.get("error", f"HTTP {response.status_code}")
+                print(f"⚠️ Failed to send request form: {error_msg}")
+                return {"success": False, "error": error_msg}
+    except Exception as e:
+        print(f"❌ Error sending request form: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+async def end_call(call_id: str, call_sid: str | None = None) -> dict:
+    """End a call by terminating Twilio call and updating status.
+    
+    This properly ends the call by:
+    1. Terminating the Twilio call (if call_sid provided)
+    2. Updating call status to COMPLETED via Next.js API
+    """
+    if not call_id:
+        return {"success": False, "error": "call_id is required"}
+    
+    try:
+        # First, try to terminate the Twilio call if we have the call_sid
+        if call_sid:
+            from services.twilio_service import get_twilio_client
+            twilio_client = get_twilio_client()
+            if twilio_client:
+                try:
+                    twilio_client.calls(call_sid).update(status='completed')
+                    print(f"✅ Twilio call terminated: callSid={call_sid}")
+                except Exception as twilio_error:
+                    print(f"⚠️ Error terminating Twilio call: {twilio_error}")
+                    # Continue even if Twilio termination fails
+        
+        # Update call status to COMPLETED via Next.js API
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{APP_URL}/api/calls/{call_id}/status",
+                json={
+                    "status": "COMPLETED",
+                    "endedAt": int(time.time() * 1000)  # Current timestamp in milliseconds
+                },
+                timeout=10.0
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ Call ended successfully: callId={call_id}")
+                return {"success": True, "message": "Call ended successfully"}
+            else:
+                error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                error_msg = error_data.get("error", f"HTTP {response.status_code}")
+                print(f"⚠️ Failed to end call: {error_msg}")
+                return {"success": False, "error": error_msg}
+    except Exception as e:
+        print(f"❌ Error ending call: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+

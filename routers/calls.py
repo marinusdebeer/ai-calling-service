@@ -13,7 +13,7 @@ from config import (
     AI_CALLING_SERVICE_URL,
 )
 from services.twilio_service import get_twilio_client, is_twilio_configured
-from services.nextjs_client import fetch_call_id, update_call_record
+from services.nextjs_client import fetch_call_id, fetch_call_details, update_call_record
 from state import incoming_call_mapping, agent_call_mapping
 from handlers.media_stream import handle_media_stream
 from utils.url_parser import build_media_stream_url
@@ -54,11 +54,23 @@ async def incoming_call(request: Request):
         # Try to find callId from Next.js API using callSid
         call_id = await fetch_call_id(call_sid)
         
+        # Fetch call details to get clientId and phone number
+        client_id = None
+        to_phone = None
+        if call_id:
+            call_details = await fetch_call_details(call_id)
+            if call_details:
+                call_data = call_details.get("call", {})
+                client_id = call_data.get("clientId")
+                to_phone = call_data.get("toPhone") or call_data.get("fromPhone")
+        
         # Store mapping for agent-call to look up later
         if call_id:
             incoming_call_mapping[call_sid] = {
                 "call_id": call_id,
+                "client_id": client_id,  # Store clientId
                 "from": caller,
+                "to": to_phone,  # Store phone number
                 "timestamp": time.time()
             }
         
@@ -184,6 +196,7 @@ async def initiate_ai_call(request: Request):
     try:
         data = await request.json()
         call_id = data.get("callId")
+        client_id = data.get("clientId")  # Get clientId from request
         to_phone = data.get("toPhone")
         from_phone = data.get("fromPhone", TWILIO_PHONE_NUMBER)
         initial_prompts = data.get("initialPrompts", [])
@@ -248,7 +261,7 @@ async def initiate_ai_call(request: Request):
         )
         
         call_sid = call.sid
-        print(f"✅ Call started: callSid={call_sid}, callId={call_id}")
+        print(f"✅ Call started: callSid={call_sid}, callId={call_id}, clientId={client_id}, toPhone={to_phone}")
         
         # Store mapping for Media Stream handler
         # The handler receives call_id in URL path, but needs to map to callSid
@@ -256,17 +269,19 @@ async def initiate_ai_call(request: Request):
         if call_id:
             incoming_call_mapping[call_id] = {
                 "call_id": call_id,
+                "client_id": client_id,  # Store clientId
                 "twilio_call_sid": call_sid,
                 "from": TWILIO_PHONE_NUMBER,
-                "to": to_phone,
+                "to": to_phone,  # Store phone number
                 "timestamp": time.time(),
                 "is_outgoing": True,
                 "initial_prompts": initial_prompts,
             }
             incoming_call_mapping[call_sid] = {
                 "call_id": call_id,
+                "client_id": client_id,  # Store clientId
                 "from": TWILIO_PHONE_NUMBER,
-                "to": to_phone,
+                "to": to_phone,  # Store phone number
                 "timestamp": time.time(),
                 "is_outgoing": True,
                 "initial_prompts": initial_prompts,
