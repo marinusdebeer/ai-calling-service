@@ -14,7 +14,9 @@ from services.nextjs_client import (
     send_transcript,
     update_call_metadata,
     update_call_record,
+    send_website_link,
     send_request_form,
+    send_gift_card_form,
     end_call as end_call_api,
 )
 from state import (
@@ -356,11 +358,9 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                         
                         print(f"🔧 Function call: {function_name} with args: {function_arguments}")
                         
-                        # Handle send_request_form function
-                        if function_name == "send_request_form" and call_id:
-                            # Extract destination parameter (defaults to "request_form" if not provided)
-                            destination = function_arguments.get("destination", "request_form")
-                            result = await send_request_form(call_id, destination)
+                        # Handle send_website_link function
+                        if function_name == "send_website_link" and call_id:
+                            result = await send_website_link(call_id)
                             
                             # Send function result back to OpenAI
                             function_result = {
@@ -371,9 +371,52 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                                     "output": json.dumps(result)
                                 }
                             }
-                            # await openai_ws.send(json.dumps(function_result))
-                            await openai_ws.send(json.dumps({"type": "response.create"}))
-                            print(f"✅ Function result sent for {function_name}: {result}")
+                            if openai_ws and openai_ws.open:
+                                try:
+                                    await openai_ws.send(json.dumps(function_result))
+                                    print(f"✅ Function result sent for {function_name}: {result}")
+                                except Exception as e:
+                                    print(f"⚠️ Error sending function result: {e}")
+                        
+                        # Handle send_request_form function
+                        elif function_name == "send_request_form" and call_id:
+                            result = await send_request_form(call_id)
+                            
+                            # Send function result back to OpenAI
+                            function_result = {
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": function_call_id,
+                                    "output": json.dumps(result)
+                                }
+                            }
+                            if openai_ws and openai_ws.open:
+                                try:
+                                    await openai_ws.send(json.dumps(function_result))
+                                    print(f"✅ Function result sent for {function_name}: {result}")
+                                except Exception as e:
+                                    print(f"⚠️ Error sending function result: {e}")
+                        
+                        # Handle send_gift_card_form function
+                        elif function_name == "send_gift_card_form" and call_id:
+                            result = await send_gift_card_form(call_id)
+                            
+                            # Send function result back to OpenAI
+                            function_result = {
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": function_call_id,
+                                    "output": json.dumps(result)
+                                }
+                            }
+                            if openai_ws and openai_ws.open:
+                                try:
+                                    await openai_ws.send(json.dumps(function_result))
+                                    print(f"✅ Function result sent for {function_name}: {result}")
+                                except Exception as e:
+                                    print(f"⚠️ Error sending function result: {e}")
                         
                         # Handle end_call function
                         elif function_name == "end_call":

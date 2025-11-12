@@ -258,8 +258,8 @@ async def forward_recording_webhook(call_id: str | None, form_data: dict):
         traceback.print_exc()
 
 
-async def send_request_form(call_id: str, destination: str = "request_form") -> dict:
-    """Send a link via SMS to the caller.
+async def _send_link(call_id: str, destination: str) -> dict:
+    """Internal function to send a link via SMS to the caller.
     
     All information (clientId, phone number) is automatically retrieved from the call record.
     
@@ -269,11 +269,6 @@ async def send_request_form(call_id: str, destination: str = "request_form") -> 
     """
     if not call_id:
         return {"success": False, "error": "call_id is required"}
-    
-    # Validate destination
-    valid_destinations = ["website", "request_form", "gift_card_form"]
-    if destination not in valid_destinations:
-        destination = "request_form"  # Default to request_form if invalid
     
     try:
         async with httpx.AsyncClient() as client:
@@ -299,6 +294,21 @@ async def send_request_form(call_id: str, destination: str = "request_form") -> 
         import traceback
         traceback.print_exc()
         return {"success": False, "error": str(e)}
+
+
+async def send_website_link(call_id: str) -> dict:
+    """Send website homepage link via SMS to the caller."""
+    return await _send_link(call_id, "website")
+
+
+async def send_request_form(call_id: str) -> dict:
+    """Send request form link via SMS to the caller."""
+    return await _send_link(call_id, "request_form")
+
+
+async def send_gift_card_form(call_id: str) -> dict:
+    """Send gift card form link via SMS to the caller."""
+    return await _send_link(call_id, "gift_card_form")
 
 
 async def end_call(call_id: str, call_sid: str | None = None) -> dict:

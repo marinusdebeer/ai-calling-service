@@ -55,17 +55,31 @@ async def initialize_session(openai_ws, initial_prompts=None):
     tools = [
         {
             "type": "function",
-            "name": "send_request_form",
-            "description": "Send a text message with a link to the caller. Use this to send them to the website homepage, the request form, or the gift card form. The link will be sent via SMS to the caller's phone number (which is automatically retrieved from the call). Choose the destination based on what the caller needs: 'website' for general information, 'request_form' for service requests, or 'gift_card_form' for purchasing gift cards.",
+            "name": "send_website_link",
+            "description": "Send a text message with a link to the company website homepage. Use this when the caller asks for general information, wants to visit the website, or learn more about the company. The link will be sent via SMS to the caller's phone number (which is automatically retrieved from the call). You don't need to provide any parameters.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "destination": {
-                        "type": "string",
-                        "enum": ["website", "request_form", "gift_card_form"],
-                        "description": "Where to send the caller: 'website' for the homepage, 'request_form' for service requests, or 'gift_card_form' for gift card purchases. Defaults to 'request_form' if not specified."
-                    }
-                },
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "type": "function",
+            "name": "send_request_form",
+            "description": "Send a text message with a link to the request form. Use this when a new lead or existing client needs to fill out the request form to provide their service details, book a service, request a quote, or schedule cleaning. The form link will be sent via SMS to the caller's phone number (which is automatically retrieved from the call). You don't need to provide any parameters.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "type": "function",
+            "name": "send_gift_card_form",
+            "description": "Send a text message with a link to the gift card purchase form. Use this when the caller asks about gift cards, purchasing gift cards, buying gift cards, or sending gift cards. The gift card form link will be sent via SMS to the caller's phone number (which is automatically retrieved from the call). You don't need to provide any parameters.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
                 "required": []
             }
         },
