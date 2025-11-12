@@ -15,7 +15,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # Audio format configuration - using g711_ulaw directly (no conversion needed)
 OPENAI_INPUT_FORMAT = "g711_ulaw"
 OPENAI_OUTPUT_FORMAT = "g711_ulaw"
-VOICE = os.getenv("OPENAI_VOICE", "ash")
+VOICE = "ash"
 AI_ASSISTANT_INSTRUCTIONS = (
     "You are a helpful assistant for a cleaning service company, Zen Zone Cleaning Services. "
     "Be professional, friendly, and helpful. Your name is Brad. "

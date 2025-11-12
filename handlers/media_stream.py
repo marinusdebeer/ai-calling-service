@@ -9,15 +9,28 @@ from fastapi import WebSocket, WebSocketDisconnect
 from services.openai_service import connect_to_openai_realtime, send_initial_greeting
 from services.nextjs_client import (
     fetch_call_id,
+    fetch_call_details,
     update_call_status,
     send_transcript,
     update_call_metadata,
+    update_call_record,
 )
 from state import (
     active_connections,
     incoming_call_mapping,
     agent_call_mapping,
+    cleanup_call_mappings,
 )
+from utils.constants import (
+    SPEAKER_ADMIN,
+    SPEAKER_CALLER,
+    SPEAKER_AI,
+    STATUS_IN_PROGRESS,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+)
+from utils.call_utils import is_prisma_call_id
+from utils.transcript_utils import check_and_send_initial_prompts
 
 
 async def handle_media_stream(websocket: WebSocket, call_sid: str):
@@ -66,9 +79,9 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
         try:
             call_id = await fetch_call_id(call_sid)
             if call_id:
-                await update_call_status(call_id, "FAILED")
-        except Exception:
-            pass
+                await update_call_status(call_id, STATUS_FAILED)
+        except Exception as e:
+            print(f"⚠️ Error updating call status to FAILED: {e}")
         return
     
     stream_sid = None
@@ -76,10 +89,11 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     response_start_ts = None
     last_item = None
     call_id = None  # Store callId for transcript updates
+    initial_prompts_sent = False  # Track if we've already sent initial prompts as transcripts
     
     # Path param might be callId (for incoming calls) or callSid (for outgoing)
-    # Prisma IDs typically start with 'cm' and are longer alphanumeric strings
-    if call_sid.startswith('cm') and len(call_sid) > 20:
+    # Use utility function to detect Prisma callId format
+    if is_prisma_call_id(call_sid):
         # Likely a Prisma callId - use it directly
         call_id = call_sid
     else:
@@ -88,7 +102,12 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
     
     if call_id:
         # Update call status to IN_PROGRESS when media stream connects
-        await update_call_status(call_id, "IN_PROGRESS", answered_at=int(time.time() * 1000))
+        await update_call_status(call_id, STATUS_IN_PROGRESS, answered_at=int(time.time() * 1000))
+        
+        # Check and send initial prompts if we have them (utility handles fetching transcripts)
+        if initial_prompts and not initial_prompts_sent:
+            await check_and_send_initial_prompts(call_id, initial_prompts, None, send_transcript, initial_prompts_sent)
+            initial_prompts_sent = True
     
     async def on_speech_started():
         """Handle user interruption - cancel OpenAI's current response"""
@@ -136,12 +155,25 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                             prompts = incoming_call_mapping[actual_call_sid].get("initial_prompts", [])
                             if prompts:
                                 initial_prompts = prompts
+                                # Send initial prompts as transcript entries if we haven't already
+                                if call_id and prompts and not initial_prompts_sent:
+                                    await check_and_send_initial_prompts(call_id, prompts, None, send_transcript, initial_prompts_sent)
+                                    initial_prompts_sent = True
                     
                     # Update call_id if we have actual_call_sid and don't have it yet
                     if actual_call_sid and not call_id:
                         call_id = await fetch_call_id(actual_call_sid)
                         if call_id:
-                            await update_call_status(call_id, "IN_PROGRESS", answered_at=int(time.time() * 1000))
+                            # Send initial prompts as transcript entries if we have them and haven't sent them yet
+                            if initial_prompts and not initial_prompts_sent:
+                                await check_and_send_initial_prompts(call_id, initial_prompts, None, send_transcript, initial_prompts_sent)
+                                initial_prompts_sent = True
+                            
+                            # Store the agent callSid in database
+                            if actual_call_sid:
+                                await update_call_record(call_id, None, None, actual_call_sid, None)
+                            
+                            await update_call_status(call_id, STATUS_IN_PROGRESS, answered_at=int(time.time() * 1000))
                     
                     # Update active_connections to use actual_call_sid if different
                     if actual_call_sid and actual_call_sid != call_sid:
@@ -241,23 +273,22 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
                     transcript = msg.get("transcript", "")
                     if transcript and transcript.strip() and call_id:
                         print(f"📝 Caller transcript: {transcript}")
-                        await send_transcript(call_id, transcript.strip(), "caller")
+                        await send_transcript(call_id, transcript.strip(), SPEAKER_CALLER)
                 
                 elif typ == "response.audio_transcript.done":
                     # AI speaking (assistant output) - complete transcription
                     transcript = msg.get("transcript", "")
                     if transcript and transcript.strip() and call_id:
                         print(f"📝 AI transcript: {transcript}")
-                        await send_transcript(call_id, transcript.strip(), "ai")
+                        await send_transcript(call_id, transcript.strip(), SPEAKER_AI)
                 
                 elif typ == "response.text.done":
                     # This is the AI's text response (alternative to audio transcription)
-                    # Use this as a fallback if audio transcription isn't available
                     text = msg.get("text")
-                    if text:
+                    if text and call_id:
                         print(f"📝 AI text response (callSid={call_sid}): {text}")
                         # Send to Next.js for real-time display
-                        await send_transcript(call_id, text, "ai")
+                        await send_transcript(call_id, text, SPEAKER_AI)
         except WebSocketDisconnect as e:
             print(f"🔌 OpenAI WebSocket disconnected - call ending")
         except Exception as e:
@@ -277,17 +308,18 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
         cleanup_sid = actual_call_sid if actual_call_sid else call_sid
         print(f"🔌 AI call ended: callId={call_id or 'N/A'}, callSid={cleanup_sid}")
         
-        # Clean up mappings using actual_call_sid if available
+        # Determine original call_sid for cleanup
+        # For incoming calls, cleanup_sid might be agent_call_sid, so we need to find original
+        original_call_sid = cleanup_sid
         if cleanup_sid in agent_call_mapping:
             original_call_sid = agent_call_mapping[cleanup_sid]
-            del agent_call_mapping[cleanup_sid]
-            # Clean up incoming call mapping
-            if original_call_sid in incoming_call_mapping:
-                del incoming_call_mapping[original_call_sid]
+        
+        # Clean up mappings using utility function
+        cleanup_call_mappings(original_call_sid, cleanup_sid if cleanup_sid != original_call_sid else None)
         
         # Also clean up by path param if different
-        if call_sid != cleanup_sid and call_sid in agent_call_mapping:
-            del agent_call_mapping[call_sid]
+        if call_sid != cleanup_sid and call_sid != original_call_sid:
+            cleanup_call_mappings(call_sid, None)
         
         # Remove from active connections (try both)
         if cleanup_sid in active_connections:
@@ -295,12 +327,50 @@ async def handle_media_stream(websocket: WebSocket, call_sid: str):
         if call_sid != cleanup_sid and call_sid in active_connections:
             del active_connections[call_sid]
         
-        # Update call status to COMPLETED
+        # Update call status to COMPLETED and compile final transcript
         if call_id:
             try:
-                await update_call_status(call_id, "COMPLETED", ended_at=int(time.time() * 1000))
+                # Get call details to compile transcripts from metadata
+                call_details = await fetch_call_details(call_id)
+                if call_details:
+                    call_data = call_details.get("call", {})
+                    metadata = call_data.get("metadata", {}) or {}
+                    transcripts = metadata.get("transcripts", [])
+                    
+                    # Compile all transcripts into a single transcription field
+                    if transcripts:
+                        # Sort by timestamp
+                        sorted_transcripts = sorted(transcripts, key=lambda x: x.get("timestamp", 0))
+                        
+                        # Get initial prompts from metadata to include at the start
+                        initial_prompts = metadata.get("initialPrompts", [])
+                        transcription_parts = []
+                        
+                        # Add initial prompts at the beginning if they exist
+                        if initial_prompts:
+                            for prompt in initial_prompts:
+                                if prompt and prompt.strip():
+                                    transcription_parts.append(f"[ADMIN]: {prompt.strip()}")
+                        
+                        # Add all transcripts
+                        transcription_parts.extend([
+                            f"[{t.get('speaker', 'unknown').upper()}]: {t.get('text', '')}"
+                            for t in sorted_transcripts
+                        ])
+                        
+                        transcription_text = "\n".join(transcription_parts)
+                        
+                        # Update call with compiled transcription in metadata
+                        # The transcription field will be updated when recording is processed
+                        await update_call_metadata(call_id, {
+                            "finalTranscription": transcription_text,
+                            "transcriptCount": len(transcripts)
+                        })
+                
+                await update_call_status(call_id, STATUS_COMPLETED, ended_at=int(time.time() * 1000))
+                print(f"✅ Call status updated to {STATUS_COMPLETED}: callId={call_id}")
             except Exception as e:
-                print(f"❌ Error updating call status to COMPLETED: {e}")
+                print(f"❌ Error updating call status to {STATUS_COMPLETED}: {e}")
                 import traceback
                 traceback.print_exc()
         

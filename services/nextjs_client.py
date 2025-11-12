@@ -6,6 +6,10 @@ from datetime import datetime
 import httpx
 from config import APP_URL
 from state import incoming_call_mapping, agent_call_mapping
+from utils.constants import (
+    STATUS_IN_PROGRESS,
+    STATUS_COMPLETED,
+)
 
 
 async def fetch_call_id(call_sid: str) -> str | None:
@@ -26,7 +30,7 @@ async def fetch_call_id(call_sid: str) -> str | None:
         if original_call_sid in incoming_call_mapping:
             return incoming_call_mapping[original_call_sid].get("call_id")
     
-    # Fallback: try to fetch from Next.js API
+    # Fetch from Next.js API
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
@@ -80,21 +84,22 @@ async def update_call_status(
             if ended_at:
                 payload["endedAt"] = ended_at
             
-            # If setting status to IN_PROGRESS, check if this is an incoming call
-            # that needs metadata updated (for active AI calls list)
-            if status == "IN_PROGRESS":
+            # If setting status to IN_PROGRESS, ensure incoming calls are marked as AI calls
+            # (outgoing AI calls are already marked when created, but incoming calls routed to AI
+            # might not be marked if they bypass the route-to-ai endpoint)
+            if status == STATUS_IN_PROGRESS:
                 call_details = await fetch_call_details(call_id)
                 if call_details:
                     call_data = call_details.get("call", {})
                     direction = call_data.get("direction")
-                    metadata = call_data.get("metadata", {}) or {}
+                    is_ai_call = call_data.get("isAICall", False)
                     
-                    # If it's an INBOUND call and doesn't have routedToAI set, update metadata
-                    if direction == "INBOUND" and not metadata.get("routedToAI"):
-                        await update_call_metadata(call_id, {"routedToAI": True, "aiMode": True})
+                    # If it's an INBOUND call and not already marked as AI, mark it
+                    if direction == "INBOUND" and not is_ai_call:
+                        await update_call_record(call_id, None, None, None, True)
             
             # If ending the call, calculate duration
-            if status == "COMPLETED" and ended_at:
+            if status == STATUS_COMPLETED and ended_at:
                 call_details = await fetch_call_details(call_id)
                 if call_details:
                     call_data = call_details.get("call", {})
@@ -164,18 +169,32 @@ async def send_transcript(call_id: str, text: str, speaker: str):
         traceback.print_exc()
 
 
-async def update_call_record(call_id: str, twilio_call_sid: str, status: str = "RINGING"):
+async def update_call_record(
+    call_id: str, 
+    twilio_call_sid: str | None = None, 
+    status: str | None = None,
+    twilio_agent_call_sid: str | None = None,
+    is_ai_call: bool | None = None
+):
     """Update call record in Next.js database"""
     try:
         async with httpx.AsyncClient() as client:
-            await client.put(
-                f"{APP_URL}/api/calls/{call_id}",
-                json={
-                    "twilioCallSid": twilio_call_sid,
-                    "status": status,
-                },
-                timeout=5.0
-            )
+            payload = {}
+            if twilio_call_sid:
+                payload["twilioCallSid"] = twilio_call_sid
+            if status:
+                payload["status"] = status
+            if twilio_agent_call_sid:
+                payload["twilioAgentCallSid"] = twilio_agent_call_sid
+            if is_ai_call is not None:
+                payload["isAICall"] = is_ai_call
+            
+            if payload:
+                await client.put(
+                    f"{APP_URL}/api/calls/{call_id}",
+                    json=payload,
+                    timeout=5.0
+                )
     except Exception as e:
         print(f"⚠️ Error updating call record in Next.js: {e}")
 

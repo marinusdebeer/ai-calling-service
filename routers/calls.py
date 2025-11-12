@@ -1,7 +1,6 @@
 """
 Call-related endpoints
 """
-import re
 import time
 from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -17,6 +16,9 @@ from services.twilio_service import get_twilio_client, is_twilio_configured
 from services.nextjs_client import fetch_call_id, update_call_record
 from state import incoming_call_mapping, agent_call_mapping
 from handlers.media_stream import handle_media_stream
+from utils.url_parser import build_media_stream_url
+from utils.call_utils import validate_call_id
+from utils.constants import STATUS_RINGING, MAX_CALL_DURATION_SECONDS
 
 router = APIRouter()
 
@@ -103,7 +105,6 @@ async def agent_call(request: Request):
         
         from_number = data.get("From", "")
         
-        original_call_sid = None
         call_id = None
         
         # Look up call info from mapping for incoming calls
@@ -123,39 +124,27 @@ async def agent_call(request: Request):
             # Store mapping for Media Stream handler
             agent_call_mapping[call_sid] = original_call_sid
             
+            # Store agent callSid in database
+            if call_id:
+                await update_call_record(call_id, None, None, call_sid, True)
+            
             print(f"🤖 Agent call received: agentCallSid={call_sid}, callId={call_id}")
         else:
-            # Fallback: try to look up by callSid in Next.js API
-            call_id = await fetch_call_id(call_sid)
-            
-            # If we still don't have a callId, this is likely a duplicate or orphaned agent call
-            # Reject it to prevent it from showing up in the browser
-            if not call_id:
-                print(f"⚠️ Rejecting agent call without callId: callSid={call_sid}")
-                twiml = VoiceResponse()
-                twiml.hangup()
-                return HTMLResponse(content=str(twiml), media_type="application/xml")
+            # No matching call found - reject orphaned agent call
+            print(f"⚠️ Rejecting agent call without callId: callSid={call_sid}")
+            twiml = VoiceResponse()
+            twiml.hangup()
+            return HTMLResponse(content=str(twiml), media_type="application/xml")
         
-        # Generate TwiML
-        # Use AI_CALLING_SERVICE_URL for production (Railway proxy issue)
-        # Fallback to request hostname for local development
-        if AI_CALLING_SERVICE_URL:
-            raw_domain = AI_CALLING_SERVICE_URL
-            # Properly extract domain - remove protocol and trailing slashes, strip all whitespace
-            if raw_domain.startswith('https://'):
-                domain = raw_domain[8:].rstrip('/').strip()  # Remove 'https://' and trailing /
-            elif raw_domain.startswith('http://'):
-                domain = raw_domain[7:].rstrip('/').strip()  # Remove 'http://' and trailing /
-            else:
-                domain = raw_domain.rstrip('/').strip()
-            # Use WSS for production URLs, WS for localhost
-            protocol = "wss" if "localhost" not in domain and "127.0.0.1" not in domain else "ws"
-            stream_url = f"{protocol}://{domain}/media-stream/{call_id}".strip().replace('\n', '').replace('\r', '')
-        else:
-            # Fallback for local development
-            host = request.url.hostname
-            protocol = "wss" if "localhost" not in host and "127.0.0.1" not in host else "ws"
-            stream_url = f"{protocol}://{host}/media-stream/{call_id}".strip().replace('\n', '').replace('\r', '')
+        # Ensure we have call_id before proceeding
+        if not call_id:
+            print(f"⚠️ Rejecting agent call without callId: callSid={call_sid}")
+            twiml = VoiceResponse()
+            twiml.hangup()
+            return HTMLResponse(content=str(twiml), media_type="application/xml")
+        
+        # Generate TwiML - build media stream URL
+        stream_url = build_media_stream_url(call_id, AI_CALLING_SERVICE_URL)
         
         # Incoming call: Set up Media Stream (this bridges to OpenAI Realtime API)
         twiml = VoiceResponse()
@@ -164,7 +153,7 @@ async def agent_call(request: Request):
         twiml.append(connect)
         
         # Keep call active
-        twiml.pause(length=3600)  # Pause for 1 hour (max call duration)
+        twiml.pause(length=MAX_CALL_DURATION_SECONDS)
         
         twiml_xml = str(twiml)
         
@@ -223,39 +212,25 @@ async def initiate_ai_call(request: Request):
                 status_code=400
             )
         
-        # Use inline TwiML with Connect/Stream
-        # Note: We use call_id in the URL path, but Twilio will send the actual callSid
-        # in the WebSocket connection data. The handler will extract callSid from the
-        # WebSocket "connected" event and use that to look up the mapping.
-        raw_domain = AI_CALLING_SERVICE_URL or ""
-        # Properly extract domain - remove protocol and trailing slashes, strip all whitespace
-        if raw_domain.startswith('https://'):
-            domain = raw_domain[8:].rstrip('/').strip()  # Remove 'https://' and trailing /
-        elif raw_domain.startswith('http://'):
-            domain = raw_domain[7:].rstrip('/').strip()  # Remove 'http://' and trailing /
-        else:
-            domain = raw_domain.rstrip('/').strip()
-        
-        # Also, ensure call_id is URL-safe (no special characters)
-        # The call_id should already be safe, but let's make sure
-        # For now, we'll just ensure it's not empty and doesn't have special chars
-        if not call_id or any(c in call_id for c in "!@#$%^&*()[]{};:,./<>?\\|`~"):
+        # Validate call_id is safe for URL construction
+        if not validate_call_id(call_id):
             print(f"⚠️ Rejecting call with invalid call_id: {call_id}")
             return JSONResponse(
                 {"error": "Invalid call_id format. It should be alphanumeric or hyphens only."},
                 status_code=400
             )
 
-        # Use call_id in URL - handler will get actual callSid from WebSocket connection
-        # Use Twilio's VoiceResponse to ensure proper XML encoding
-        # Strip any whitespace/newlines from URL to prevent XML encoding issues
-        stream_url = f"wss://{domain}/media-stream/{call_id}".strip().replace('\n', '').replace('\r', '')
+        # Use inline TwiML with Connect/Stream
+        # Note: We use call_id in the URL path, but Twilio will send the actual callSid
+        # in the WebSocket connection data. The handler will extract callSid from the
+        # WebSocket "connected" event and use that to look up the mapping.
+        stream_url = build_media_stream_url(call_id, AI_CALLING_SERVICE_URL)
         twiml_response = VoiceResponse()
         connect = Connect()
         connect.stream(url=stream_url)
         twiml_response.append(connect)
         # Keep call active
-        twiml_response.pause(length=3600)  # Pause for 1 hour (max call duration)
+        twiml_response.pause(length=MAX_CALL_DURATION_SECONDS)
         outbound_twiml = str(twiml_response)
         
         # Enable recording for outgoing AI calls
@@ -298,7 +273,7 @@ async def initiate_ai_call(request: Request):
             }
         
         # Update call record in Next.js database
-        await update_call_record(call_id, call.sid, "RINGING")
+        await update_call_record(call_id, call.sid, STATUS_RINGING, None, None)
         
         return JSONResponse({
             "success": True,
